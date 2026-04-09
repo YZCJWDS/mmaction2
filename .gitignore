@@ -116,6 +116,9 @@ venv.bak/
 /data
 .vscode
 .idea
+.tmp/
+.tmp_python/
+.torch_cache/
 *.pkl
 *.pkl.json
 *.log.json
@@ -149,3 +152,5 @@ mmaction/tools/*
 !demo/*.ipynb
 !projects/stad_tutorial/*.ipynb
 mmaction/.mim
+sitecustomize.py
+tools/local/

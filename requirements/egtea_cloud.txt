@@ -1,0 +1,5 @@
+mmengine==0.10.7
+mmcv-lite==2.1.0
+decord==0.6.0
+opencv-python==4.10.0.84
+importlib_metadata

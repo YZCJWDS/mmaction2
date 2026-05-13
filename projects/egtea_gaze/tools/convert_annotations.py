@@ -13,10 +13,10 @@
 
 Usage:
     python projects/egtea_gaze/tools/convert_annotations.py \
-        --ann-dir /root/data/egtea/annotations \
+        --ann-dir /root/data/egtea/action_annotation \
         --split 1 \
         --video-dir /root/data/egtea/videos \
-        --output-dir /root/data/egtea/annotations
+        --output-dir /root/data/egtea/action_annotation
 """
 import argparse
 import os

@@ -138,7 +138,7 @@ echo "[5/6] 创建项目目录结构..."
 
 mkdir -p /root/data/egtea/raw
 mkdir -p /root/data/egtea/videos
-mkdir -p /root/data/egtea/annotations
+mkdir -p /root/data/egtea/action_annotation
 mkdir -p /root/data/egtea/gaze_data
 mkdir -p /root/outputs/egtea_gaze
 mkdir -p /root/checkpoints
@@ -146,7 +146,7 @@ mkdir -p /root/logs
 
 echo "  /root/data/egtea/raw          <- 上传压缩包到这里"
 echo "  /root/data/egtea/videos       <- 视频解压目标"
-echo "  /root/data/egtea/annotations  <- 标注文件"
+echo "  /root/data/egtea/action_annotation <- 标注文件"
 echo "  /root/outputs/egtea_gaze      <- 训练输出"
 echo "  /root/checkpoints             <- 预训练权重"
 echo ""

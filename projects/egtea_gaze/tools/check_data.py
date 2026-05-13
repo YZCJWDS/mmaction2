@@ -5,7 +5,7 @@
 Usage:
     python projects/egtea_gaze/tools/check_data.py \
         --data-root /root/data/egtea/videos \
-        --ann-dir /root/data/egtea/annotations
+        --ann-dir /root/data/egtea/action_annotation
 """
 import argparse
 import os

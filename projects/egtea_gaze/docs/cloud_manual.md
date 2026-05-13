@@ -249,7 +249,7 @@ pip uninstall decord -y && pip install decord
 
 **Q: 标注路径不匹配？**
 ```bash
-head -1 /root/data/egtea/annotations/train.txt
+head -1 /root/data/egtea/action_annotation/train.txt
 # 期望: cropped_clips/xxx/xxx.mp4 0
 ls /root/data/egtea/videos/cropped_clips/ | head -3
 ```

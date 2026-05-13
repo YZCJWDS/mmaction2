@@ -117,7 +117,6 @@ fi
 echo ""
 echo "--- Step 4: 检查/生成 MMAction2 格式标注 ---"
 
-# MMAction2 格式的 train/val/test.txt 放在 action_annotation/ 下
 ANN_DIR="$DATA_ROOT/action_annotation"
 
 if [ -f "$ANN_DIR/train.txt" ] && [ -f "$ANN_DIR/val.txt" ] && [ -f "$ANN_DIR/test.txt" ]; then

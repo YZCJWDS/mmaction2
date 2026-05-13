@@ -12,11 +12,11 @@ echo ""
 echo "--- 系统信息 ---"
 echo "OS: $(uname -a)"
 echo "GPU:"
-nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>/dev/null || echo "  [WARN] nvidia-smi not found"
+nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>/dev/null || echo "  [INFO] nvidia-smi not found (无卡模式)"
 echo ""
 
 echo "--- CUDA ---"
-nvcc --version 2>/dev/null || echo "  [WARN] nvcc not found, checking alternative..."
+nvcc --version 2>/dev/null || echo "  [INFO] nvcc not found"
 if [ -f /usr/local/cuda/version.txt ]; then
     cat /usr/local/cuda/version.txt
 fi
@@ -44,6 +44,9 @@ if torch.cuda.is_available():
         print(f'  GPU {i}: {torch.cuda.get_device_name(i)}')
         mem = torch.cuda.get_device_properties(i).total_mem / 1024**3
         print(f'    Memory: {mem:.1f} GB')
+else:
+    print(f'  CUDA built version: {torch.version.cuda}')
+    print(f'  [INFO] 无卡模式，挂卡后 CUDA 即可用')
 " 2>/dev/null || echo "  [WARN] PyTorch not installed"
 echo ""
 

@@ -2,14 +2,16 @@
 # ============================================================
 # EGTEA Gaze+ 项目 - 云端一键环境配置脚本
 #
-# 功能: 自动检测 CUDA 版本，安装 PyTorch + MMAction2 全套依赖
-# 前提: 云端镜像已有 CUDA 驱动 + conda
+# 功能: 安装 PyTorch + MMAction2 全套依赖
+# 支持无卡环境配置（先装环境，后挂卡训练）
 #
 # 使用方法 (JupyterLab 终端):
 #   cd /root/mmaction2
 #   bash projects/egtea_gaze/tools/setup_env.sh
 #
-# 如果镜像已有 PyTorch，脚本会检测并跳过重复安装
+# 指定 CUDA 版本 (无卡时无法自动检测):
+#   CUDA_TARGET=11.8 bash projects/egtea_gaze/tools/setup_env.sh
+#   CUDA_TARGET=12.1 bash projects/egtea_gaze/tools/setup_env.sh
 # ============================================================
 
 set -e
@@ -22,18 +24,43 @@ echo ""
 # ---- Step 0: 检测基础环境 ----
 echo "[0/6] 检测基础环境..."
 
-# 检测 GPU
-if ! command -v nvidia-smi &> /dev/null; then
-    echo "  [ERROR] nvidia-smi 不可用，请确认 GPU 实例已启动"
-    exit 1
+# 检测 GPU (非强制)
+HAS_GPU=0
+CUDA_VER=""
+if command -v nvidia-smi &> /dev/null; then
+    GPU_INFO=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null || true)
+    if [ -n "$GPU_INFO" ]; then
+        HAS_GPU=1
+        echo "  GPU: $GPU_INFO"
+        CUDA_VER=$(nvidia-smi 2>/dev/null | grep -oP "CUDA Version: \K[0-9]+\.[0-9]+" || true)
+        echo "  CUDA Driver: $CUDA_VER"
+    else
+        echo "  [INFO] nvidia-smi 存在但无 GPU 设备（无卡模式）"
+    fi
+else
+    echo "  [INFO] 无 GPU / nvidia-smi 不可用（无卡模式）"
 fi
-GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
-GPU_MEM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader | head -1)
-echo "  GPU: $GPU_NAME ($GPU_MEM)"
 
-# 检测 CUDA 版本 (从 nvidia-smi 获取驱动支持的最高 CUDA 版本)
-CUDA_VER=$(nvidia-smi | grep -oP "CUDA Version: \K[0-9]+\.[0-9]+")
-echo "  CUDA Driver Version: $CUDA_VER"
+# 如果用户通过环境变量指定了 CUDA 版本，优先使用
+if [ -n "$CUDA_TARGET" ]; then
+    CUDA_VER="$CUDA_TARGET"
+    echo "  使用用户指定 CUDA 版本: $CUDA_VER"
+fi
+
+# 如果仍然没有 CUDA 版本，尝试从 nvcc 获取
+if [ -z "$CUDA_VER" ]; then
+    if command -v nvcc &> /dev/null; then
+        CUDA_VER=$(nvcc --version | grep -oP "release \K[0-9]+\.[0-9]+" || true)
+        echo "  从 nvcc 检测 CUDA: $CUDA_VER"
+    fi
+fi
+
+# 最终 fallback: 默认 11.8
+if [ -z "$CUDA_VER" ]; then
+    CUDA_VER="11.8"
+    echo "  [WARN] 无法检测 CUDA 版本，默认使用 $CUDA_VER"
+    echo "  如需指定: CUDA_TARGET=12.1 bash setup_env.sh"
+fi
 
 # 检测 conda
 if ! command -v conda &> /dev/null; then
@@ -50,7 +77,6 @@ echo ""
 # ---- Step 1: 创建/激活 conda 环境 ----
 echo "[1/6] 配置 conda 环境 (egtea)..."
 
-# conda init for current shell
 eval "$(conda shell.bash hook)" 2>/dev/null || true
 
 if conda env list | grep -q "^egtea "; then
@@ -68,44 +94,39 @@ echo ""
 # ---- Step 2: 安装 PyTorch ----
 echo "[2/6] 安装 PyTorch..."
 
-# 检查是否已有可用的 PyTorch
+# 检查是否已有 PyTorch (不要求 CUDA 可用，只要能 import)
 PYTORCH_OK=0
-python -c "import torch; assert torch.cuda.is_available(); print(f'  已有 PyTorch {torch.__version__}, CUDA={torch.version.cuda}')" 2>/dev/null && PYTORCH_OK=1
+python -c "import torch; print(f'  已有 PyTorch {torch.__version__}')" 2>/dev/null && PYTORCH_OK=1
 
 if [ $PYTORCH_OK -eq 1 ]; then
-    echo "  PyTorch 已可用，跳过安装"
+    echo "  PyTorch 已安装，跳过"
+    # 额外检查 CUDA 支持
+    python -c "import torch; print(f'  CUDA available: {torch.cuda.is_available()}')" 2>/dev/null || true
 else
-    echo "  检测到 CUDA $CUDA_VER，选择对应 PyTorch..."
-
-    # 根据 CUDA 版本选择安装命令
     CUDA_MAJOR=$(echo $CUDA_VER | cut -d. -f1)
-    CUDA_MINOR=$(echo $CUDA_VER | cut -d. -f2)
 
     if [ "$CUDA_MAJOR" -ge 12 ]; then
-        echo "  使用 CUDA 12.1 版本 PyTorch"
+        echo "  安装 PyTorch (CUDA 12.1)..."
         pip install torch==2.1.0 torchvision==0.16.0 --index-url https://download.pytorch.org/whl/cu121
-    elif [ "$CUDA_MAJOR" -eq 11 ] && [ "$CUDA_MINOR" -ge 8 ]; then
-        echo "  使用 CUDA 11.8 版本 PyTorch"
-        pip install torch==2.1.0 torchvision==0.16.0 --index-url https://download.pytorch.org/whl/cu118
     else
-        echo "  [WARN] CUDA $CUDA_VER 较旧，尝试 CUDA 11.8 版本"
+        echo "  安装 PyTorch (CUDA 11.8)..."
         pip install torch==2.1.0 torchvision==0.16.0 --index-url https://download.pytorch.org/whl/cu118
     fi
 
-    # 验证
-    python -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'; print(f'  [OK] PyTorch {torch.__version__}, CUDA={torch.version.cuda}')"
+    # 验证安装 (不要求 CUDA 可用)
+    python -c "import torch; print(f'  [OK] PyTorch {torch.__version__}, CUDA built: {torch.version.cuda}')"
 fi
 echo ""
 
 # ---- Step 3: 安装 MMAction2 生态 ----
 echo "[3/6] 安装 MMEngine + MMCV + MMAction2..."
 
-# 检查是否已安装
 MMACTION_OK=0
-python -c "import mmaction; print(f'  已有 mmaction {mmaction.__version__}')" 2>/dev/null && MMACTION_OK=1
+python -c "import mmaction" 2>/dev/null && MMACTION_OK=1
 
 if [ $MMACTION_OK -eq 1 ]; then
-    echo "  MMAction2 已安装，跳过"
+    python -c "import mmaction; print(f'  已有 mmaction {mmaction.__version__}')"
+    echo "  跳过安装"
 else
     pip install -U openmim
     mim install mmengine
@@ -115,7 +136,6 @@ else
     cd /root/mmaction2
     pip install -v -e .
 
-    # 验证
     python -c "
 import mmaction, mmengine, mmcv
 print(f'  [OK] mmaction={mmaction.__version__}')
@@ -128,7 +148,9 @@ echo ""
 # ---- Step 4: 安装额外依赖 ----
 echo "[4/6] 安装额外依赖 (decord, scipy, tensorboard)..."
 
-pip install decord scipy tensorboard -q
+python -c "import decord" 2>/dev/null || pip install decord -q
+python -c "import scipy" 2>/dev/null || pip install scipy -q
+python -c "import tensorboard" 2>/dev/null || pip install tensorboard -q
 
 python -c "import decord; print(f'  [OK] decord={decord.__version__}')"
 echo ""
@@ -144,11 +166,11 @@ mkdir -p /root/outputs/egtea_gaze
 mkdir -p /root/checkpoints
 mkdir -p /root/logs
 
-echo "  /root/data/egtea/raw          <- 上传压缩包到这里"
-echo "  /root/data/egtea/videos       <- 视频解压目标"
+echo "  /root/data/egtea/raw               <- 上传压缩包到这里"
+echo "  /root/data/egtea/videos            <- 视频解压目标"
 echo "  /root/data/egtea/action_annotation <- 标注文件"
-echo "  /root/outputs/egtea_gaze      <- 训练输出"
-echo "  /root/checkpoints             <- 预训练权重"
+echo "  /root/outputs/egtea_gaze           <- 训练输出"
+echo "  /root/checkpoints                  <- 预训练权重"
 echo ""
 
 # ---- Step 6: 赋予脚本执行权限 ----
@@ -165,9 +187,13 @@ echo "  环境配置完成！最终验证:"
 echo "============================================================"
 python -c "
 import torch, mmaction, mmengine, mmcv, decord
-print(f'  PyTorch:  {torch.__version__} (CUDA={torch.version.cuda})')
-print(f'  GPU:      {torch.cuda.get_device_name(0)}')
-print(f'  显存:     {torch.cuda.get_device_properties(0).total_mem/1024**3:.1f} GB')
+print(f'  PyTorch:  {torch.__version__} (CUDA built: {torch.version.cuda})')
+print(f'  CUDA available: {torch.cuda.is_available()}')
+if torch.cuda.is_available():
+    print(f'  GPU: {torch.cuda.get_device_name(0)}')
+    print(f'  显存: {torch.cuda.get_device_properties(0).total_mem/1024**3:.1f} GB')
+else:
+    print(f'  [INFO] 当前无 GPU，挂卡后即可训练')
 print(f'  mmaction: {mmaction.__version__}')
 print(f'  mmengine: {mmengine.__version__}')
 print(f'  mmcv:     {mmcv.__version__}')
@@ -184,4 +210,9 @@ echo "  2. bash projects/egtea_gaze/tools/setup_data.sh"
 echo "  3. python projects/egtea_gaze/tools/check_data.py"
 echo "  4. bash projects/egtea_gaze/tools/download_pretrained.sh"
 echo "  5. python projects/egtea_gaze/tools/smoke_test.py --config projects/egtea_gaze/configs/tsm_r50_egtea.py"
+if [ $HAS_GPU -eq 0 ]; then
+    echo ""
+    echo "  [提醒] 当前为无卡环境，环境已配置完成。"
+    echo "  挂载 GPU 后可直接开始训练，无需重新配置。"
+fi
 echo "============================================================"

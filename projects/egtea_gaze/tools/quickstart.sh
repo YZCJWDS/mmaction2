@@ -53,15 +53,33 @@ echo "================================================================"
 # ---- 检测 GPU ----
 echo ""
 echo "[1.1] 检测 GPU..."
-if ! command -v nvidia-smi &> /dev/null; then
-    echo "  [FATAL] nvidia-smi 不可用，请确认 GPU 实例"
-    exit 1
+HAS_GPU=0
+CUDA_VER=""
+if command -v nvidia-smi &> /dev/null; then
+    GPU_INFO=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null || true)
+    if [ -n "$GPU_INFO" ]; then
+        HAS_GPU=1
+        echo "  GPU: $GPU_INFO"
+        CUDA_VER=$(nvidia-smi 2>/dev/null | grep -oP "CUDA Version: \K[0-9]+\.[0-9]+" || true)
+        echo "  CUDA: $CUDA_VER"
+    else
+        echo "  [INFO] 无卡模式（nvidia-smi 存在但无设备）"
+    fi
+else
+    echo "  [INFO] 无卡模式（nvidia-smi 不可用）"
 fi
-GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
-GPU_MEM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader | head -1)
-CUDA_VER=$(nvidia-smi | grep -oP "CUDA Version: \K[0-9]+\.[0-9]+")
-echo "  GPU: $GPU_NAME ($GPU_MEM)"
-echo "  CUDA: $CUDA_VER"
+
+# CUDA 版本 fallback
+if [ -n "$CUDA_TARGET" ]; then
+    CUDA_VER="$CUDA_TARGET"
+    echo "  使用指定 CUDA: $CUDA_VER"
+elif [ -z "$CUDA_VER" ] && command -v nvcc &> /dev/null; then
+    CUDA_VER=$(nvcc --version | grep -oP "release \K[0-9]+\.[0-9]+" || true)
+fi
+if [ -z "$CUDA_VER" ]; then
+    CUDA_VER="11.8"
+    echo "  [INFO] 默认 CUDA $CUDA_VER"
+fi
 
 # ---- Conda 环境 ----
 echo ""
@@ -82,11 +100,12 @@ echo "  Python: $(python --version) @ $(which python)"
 echo ""
 echo "[1.3] 检查/安装 PyTorch..."
 PYTORCH_OK=0
-python -c "import torch; assert torch.cuda.is_available()" 2>/dev/null && PYTORCH_OK=1
+python -c "import torch" 2>/dev/null && PYTORCH_OK=1
 
 if [ $PYTORCH_OK -eq 1 ]; then
     TORCH_VER=$(python -c "import torch; print(torch.__version__)")
-    echo "  [OK] PyTorch $TORCH_VER 已可用"
+    echo "  [OK] PyTorch $TORCH_VER 已安装"
+    python -c "import torch; print(f'  CUDA available: {torch.cuda.is_available()}')" 2>/dev/null || true
 else
     CUDA_MAJOR=$(echo $CUDA_VER | cut -d. -f1)
     if [ "$CUDA_MAJOR" -ge 12 ]; then
@@ -96,7 +115,7 @@ else
         echo "  安装 PyTorch (CUDA 11.8)..."
         pip install torch==2.1.0 torchvision==0.16.0 --index-url https://download.pytorch.org/whl/cu118
     fi
-    python -c "import torch; assert torch.cuda.is_available(); print(f'  [OK] PyTorch {torch.__version__}')"
+    python -c "import torch; print(f'  [OK] PyTorch {torch.__version__}, CUDA built: {torch.version.cuda}')"
 fi
 
 # ---- MMAction2 生态 ----
@@ -133,7 +152,12 @@ echo ""
 echo "[1.6] 环境最终验证..."
 python -c "
 import torch, mmaction, mmengine, mmcv, decord
-print(f'  PyTorch:  {torch.__version__} | CUDA={torch.version.cuda} | GPU={torch.cuda.get_device_name(0)}')
+print(f'  PyTorch:  {torch.__version__} (CUDA built: {torch.version.cuda})')
+print(f'  CUDA available: {torch.cuda.is_available()}')
+if torch.cuda.is_available():
+    print(f'  GPU: {torch.cuda.get_device_name(0)}')
+else:
+    print(f'  [INFO] 无卡模式，挂卡后即可训练')
 print(f'  mmaction: {mmaction.__version__} | mmengine: {mmengine.__version__} | mmcv: {mmcv.__version__}')
 print(f'  decord:   {decord.__version__}')
 "

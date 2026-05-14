@@ -29,6 +29,8 @@ def parse_args():
     parser.add_argument('--data-root', default='/root/data/egtea')
     parser.add_argument('--video-root', required=True)
     parser.add_argument('--gaze-root', required=True)
+    parser.add_argument('--ann-root', default='',
+                        help='Baseline annotation root containing train.txt/val.txt/test.txt')
     parser.add_argument('--processed-root', default='')
     parser.add_argument('--out-root', required=True)
     parser.add_argument('--splits', nargs='*', default=['1', '2', '3'])
@@ -46,21 +48,37 @@ def parse_args():
 
 
 def collect_annotation_files(data_root: str,
+                             ann_root: str,
                              processed_root: str,
-                             splits: List[str]) -> Dict[str, str]:
-    ann_root = os.path.join(data_root, 'action_annotation')
+                             splits: List[str]) -> Tuple[Dict[str, str], str, dict]:
+    if ann_root and processed_root:
+        raise ValueError('Specify either --ann-root or --processed-root, not both.')
+
+    resolved_ann_root = ann_root or os.path.join(data_root, 'action_annotation')
     ann_files: Dict[str, str] = {}
-    for split_name in ('train', 'val', 'test'):
-        path = os.path.join(ann_root, f'{split_name}.txt')
-        if os.path.exists(path):
-            ann_files[split_name] = path
     if processed_root:
         for split in splits:
             for split_name in ('train', 'val', 'test'):
                 path = os.path.join(processed_root, f'{split_name}_s{split}.txt')
                 if os.path.exists(path):
                     ann_files[f'{split_name}_s{split}'] = path
-    return ann_files
+        mode_info = dict(
+            split_source='processed_root',
+            ann_root='',
+            processed_root=processed_root,
+        )
+        return ann_files, 'processed_root', mode_info
+
+    for split_name in ('train', 'val', 'test'):
+        path = os.path.join(resolved_ann_root, f'{split_name}.txt')
+        if os.path.exists(path):
+            ann_files[split_name] = path
+    mode_info = dict(
+        split_source='ann_root',
+        ann_root=resolved_ann_root,
+        processed_root='',
+    )
+    return ann_files, 'ann_root', mode_info
 
 
 def process_one_sample(video_relpath: str,
@@ -177,7 +195,12 @@ def process_one_sample(video_relpath: str,
 def main():
     args = parse_args()
     ensure_dir(args.out_root)
-    ann_files = collect_annotation_files(args.data_root, args.processed_root, args.splits)
+    try:
+        ann_files, split_source, mode_info = collect_annotation_files(
+            args.data_root, args.ann_root, args.processed_root, args.splits)
+    except ValueError as exc:
+        print(f'[ERROR] {exc}')
+        return 1
     if not ann_files:
         print('[ERROR] No annotation files found for gaze cache generation.')
         return 1
@@ -190,6 +213,10 @@ def main():
         fixation_values=args.fixation_values,
         coordinate_mode='normalized_per_clip',
         out_of_source_policy=args.out_of_source_policy,
+        split_source=split_source,
+        ann_root=mode_info['ann_root'],
+        processed_root=mode_info['processed_root'],
+        split_files={},
         created_at=np.datetime64('now').astype(str),
         num_samples=0,
         num_success=0,
@@ -205,9 +232,13 @@ def main():
         split_differences=[],
     )
 
-    if args.processed_root:
+    if split_source == 'processed_root':
         for base_name in ('train', 'val', 'test'):
-            baseline_ann = ann_files.get(base_name)
+            baseline_ann = os.path.join(
+                mode_info['ann_root'] or os.path.join(args.data_root, 'action_annotation'),
+                f'{base_name}.txt')
+            if not os.path.exists(baseline_ann):
+                continue
             if not baseline_ann:
                 continue
             for split in args.splits:
@@ -221,6 +252,7 @@ def main():
         ensure_dir(out_dir)
         with open(ann_path, 'r', encoding='utf-8') as handle:
             samples = [line.strip().split()[0] for line in handle if line.strip()]
+        metadata['split_files'][split_name] = ann_path
         metadata['splits'][split_name] = dict(
             ann_file=ann_path,
             out_dir=out_dir,

@@ -927,19 +927,56 @@ def resolve_video_path(video_root: str, video_relpath: str) -> str:
 
 
 def parse_clip_start_frame(video_path: str) -> Optional[int]:
+    frame_info = parse_clip_frame_info(video_path)
+    if frame_info is None:
+        return None
+    return frame_info['start_frame']
+
+
+def parse_clip_frame_info(video_path: str) -> Optional[dict]:
     candidates = [Path(video_path).stem, Path(video_path).parent.name]
-    patterns = [
-        re.compile(r'F0*(\d{3,})'),
-        re.compile(r'frame[_-]?0*(\d{3,})', re.IGNORECASE),
-        re.compile(r'0*(\d{3,})-0*(\d{3,})'),
-        re.compile(r'start[_-]?0*(\d{3,})', re.IGNORECASE),
+    prioritized_patterns = [
+        (re.compile(r'[Ff]0*(\d+)\s*[-_]\s*[Ff]0*(\d+)'), 'F_range'),
+        (re.compile(r'[Ff]0*(\d+)[-_]?[Ff]0*(\d+)'), 'F_range'),
+        (re.compile(r'Frame0*(\d+)\s*[-_]\s*Frame0*(\d+)', re.IGNORECASE), 'Frame_range'),
+    ]
+    fallback_patterns = [
+        (re.compile(r'0*(\d{3,})\s*[-_]\s*0*(\d{3,})'), 'numeric_range'),
     ]
     for text in candidates:
-        for pattern in patterns:
+        for pattern, source in prioritized_patterns:
             match = pattern.search(text)
             if match:
-                return int(match.group(1))
+                start_frame = int(match.group(1))
+                end_frame = int(match.group(2))
+                if end_frame >= start_frame:
+                    return dict(
+                        start_frame=start_frame,
+                        end_frame=end_frame,
+                        parse_source=source,
+                        matched_text=match.group(0),
+                    )
+    for text in candidates:
+        for pattern, source in fallback_patterns:
+            match = pattern.search(text)
+            if match:
+                start_frame = int(match.group(1))
+                end_frame = int(match.group(2))
+                if end_frame >= start_frame:
+                    return dict(
+                        start_frame=start_frame,
+                        end_frame=end_frame,
+                        parse_source=source,
+                        matched_text=match.group(0),
+                    )
     return None
+
+
+def parse_clip_frame_range(video_path: str) -> Optional[Tuple[int, int]]:
+    frame_info = parse_clip_frame_info(video_path)
+    if frame_info is None:
+        return None
+    return frame_info['start_frame'], frame_info['end_frame']
 
 
 def get_video_reader(video_path: str):
@@ -982,29 +1019,44 @@ def read_video_frame(video_path: str, frame_idx: int):
     return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
 
+def choose_record_for_frame(records: Sequence[dict],
+                            fixation_only: bool = False,
+                            prefer_fixation: bool = False,
+                            fixation_values: Optional[Sequence[str]] = None
+                            ) -> Tuple[Optional[dict], str]:
+    if not records:
+        return None, 'no_matching_frame'
+    fixation_records = [
+        item for item in records
+        if is_fixation_type(item.get('gaze_type'), fixation_values)
+    ]
+    if fixation_only:
+        if not fixation_records:
+            return None, 'not_fixation'
+        return fixation_records[0], 'fixation'
+    if prefer_fixation and fixation_records:
+        return fixation_records[0], 'fixation_preferred'
+    return records[0], canonicalize_gaze_type(records[0].get('gaze_type'))
+
+
 def pick_record_for_frame(records: Sequence[dict],
                           fixation_only: bool = False,
                           fixation_values: Optional[Sequence[str]] = None
                           ) -> Optional[dict]:
-    if not records:
-        return None
-    if fixation_only:
-        filtered = [
-            item for item in records
-            if is_fixation_type(item.get('gaze_type'), fixation_values)
-        ]
-        if not filtered:
-            return None
-        records = filtered
-    return records[0]
+    chosen, _ = choose_record_for_frame(
+        records, fixation_only=fixation_only, fixation_values=fixation_values)
+    return chosen
 
 
 def align_gaze_to_clip(parsed_gaze: ParsedGazeData,
                        total_frames: int,
                        fps: float,
                        start_frame: Optional[int] = None,
+                       frame_range: Optional[Tuple[int, int]] = None,
                        only_fixation: bool = False,
+                       prefer_fixation: bool = False,
                        fixation_values: Optional[Sequence[str]] = None,
+                       frame_match_tolerance: Optional[int] = None,
                        nearest_tolerance: float = 0.5) -> dict:
     frame_to_records: Dict[int, List[dict]] = defaultdict(list)
     time_pairs: List[Tuple[float, dict]] = []
@@ -1016,30 +1068,98 @@ def align_gaze_to_clip(parsed_gaze: ParsedGazeData,
         if timestamp is not None:
             scale = 0.001 if parsed_gaze.timestamp_unit == 'ms' else 1.0
             time_pairs.append((float(timestamp) * scale, record))
+    sorted_frame_ids = np.array(sorted(frame_to_records.keys()), dtype=np.int32) \
+        if frame_to_records else np.array([], dtype=np.int32)
 
     gaze_xy = np.zeros((total_frames, 2), dtype=np.float32)
     gaze_valid = np.zeros((total_frames,), dtype=np.uint8)
     gaze_type = np.array(['unknown'] * total_frames, dtype=object)
+    global_frame_ids = np.full((total_frames,), -1, dtype=np.int32)
+    matched_frame_ids = np.full((total_frames,), -1, dtype=np.int32)
+    rows_found = np.zeros((total_frames,), dtype=np.int32)
+    invalid_reasons = np.array(['no_matching_frame'] * total_frames, dtype=object)
     warning_codes: List[str] = []
     matched_fixations = 0
 
+    if frame_match_tolerance is None:
+        if frame_range is not None and total_frames > 1:
+            span = max(frame_range[1] - frame_range[0], 0)
+            estimated_step = span / max(total_frames - 1, 1)
+            frame_match_tolerance = max(2, int(math.ceil(estimated_step)))
+        else:
+            frame_match_tolerance = 2
+
+    def estimate_target_frame(clip_idx: int) -> Optional[int]:
+        if frame_range is not None:
+            start_f, end_f = frame_range
+            if total_frames <= 1:
+                return int(start_f)
+            ratio = clip_idx / max(total_frames - 1, 1)
+            return int(round(start_f + ratio * (end_f - start_f)))
+        if start_frame is not None:
+            return int(start_frame + clip_idx)
+        return None
+
+    def pick_nearest_frame_record(target_frame: int) -> Tuple[Optional[dict], Optional[int], int, str]:
+        if sorted_frame_ids.size == 0:
+            return None, None, 0, 'no_matching_frame'
+        pos = int(np.searchsorted(sorted_frame_ids, target_frame))
+        candidate_ids: List[int] = []
+        if pos < sorted_frame_ids.size:
+            candidate_ids.append(int(sorted_frame_ids[pos]))
+        if pos > 0:
+            candidate_ids.append(int(sorted_frame_ids[pos - 1]))
+        if not candidate_ids:
+            return None, None, 0, 'no_matching_frame'
+        best_frame = min(candidate_ids, key=lambda item: abs(item - target_frame))
+        if abs(best_frame - target_frame) > int(frame_match_tolerance):
+            return None, best_frame, len(frame_to_records.get(best_frame, [])), 'no_matching_frame'
+        chosen, reason = choose_record_for_frame(
+            frame_to_records.get(best_frame, []),
+            fixation_only=only_fixation,
+            prefer_fixation=prefer_fixation,
+            fixation_values=fixation_values)
+        return chosen, best_frame, len(frame_to_records.get(best_frame, [])), reason
+
     for clip_idx in range(total_frames):
         local_target = clip_idx
-        global_target = (start_frame + clip_idx) if start_frame is not None else local_target
+        global_target = estimate_target_frame(clip_idx)
+        if global_target is not None:
+            global_frame_ids[clip_idx] = int(global_target)
         chosen = None
+        chosen_reason = 'no_matching_frame'
+        chosen_frame_id = None
+        chosen_rows_found = 0
         if frame_to_records:
-            chosen = pick_record_for_frame(
-                frame_to_records.get(global_target, []),
-                fixation_only=only_fixation,
-                fixation_values=fixation_values)
-            if chosen is None and start_frame is None:
-                chosen = pick_record_for_frame(
-                    frame_to_records.get(local_target, []),
+            if global_target is not None:
+                exact_records = frame_to_records.get(global_target, [])
+                chosen_rows_found = len(exact_records)
+                chosen, chosen_reason = choose_record_for_frame(
+                    exact_records,
                     fixation_only=only_fixation,
+                    prefer_fixation=prefer_fixation,
                     fixation_values=fixation_values)
+                if chosen is not None:
+                    chosen_frame_id = int(global_target)
+                if chosen is None:
+                    chosen, chosen_frame_id, chosen_rows_found, chosen_reason = \
+                        pick_nearest_frame_record(global_target)
+            if chosen is None and global_target is None:
+                local_records = frame_to_records.get(local_target, [])
+                chosen_rows_found = len(local_records)
+                chosen, chosen_reason = choose_record_for_frame(
+                    local_records,
+                    fixation_only=only_fixation,
+                    prefer_fixation=prefer_fixation,
+                    fixation_values=fixation_values)
+                if chosen is not None:
+                    chosen_frame_id = int(local_target)
+                if chosen is None:
+                    chosen, chosen_frame_id, chosen_rows_found, chosen_reason = \
+                        pick_nearest_frame_record(local_target)
         if chosen is None and time_pairs:
             target_time = clip_idx / max(fps, 1e-6)
-            if start_frame is not None:
+            if global_target is not None:
                 target_time = global_target / max(fps, 1e-6)
             best_delta = None
             best_record = None
@@ -1049,23 +1169,34 @@ def align_gaze_to_clip(parsed_gaze: ParsedGazeData,
                     best_delta = delta
                     best_record = record
             if best_record is not None and (best_delta is None or best_delta <= nearest_tolerance):
-                candidate = pick_record_for_frame(
+                candidate, chosen_reason = choose_record_for_frame(
                     [best_record],
                     fixation_only=only_fixation,
+                    prefer_fixation=prefer_fixation,
                     fixation_values=fixation_values)
                 chosen = candidate
+                chosen_rows_found = 1
+                chosen_frame_id = int(best_record.get('frame_id')) \
+                    if best_record.get('frame_id') is not None else -1
 
         if chosen is None:
+            rows_found[clip_idx] = int(chosen_rows_found)
+            invalid_reasons[clip_idx] = chosen_reason
             continue
         gaze_xy[clip_idx, 0] = float(chosen['x'])
         gaze_xy[clip_idx, 1] = float(chosen['y'])
         gaze_type[clip_idx] = canonicalize_gaze_type(chosen.get('gaze_type'))
+        matched_frame_ids[clip_idx] = int(chosen_frame_id) if chosen_frame_id is not None else -1
+        rows_found[clip_idx] = int(chosen_rows_found)
         if record_is_explicitly_valid(chosen):
             gaze_valid[clip_idx] = 1
+            invalid_reasons[clip_idx] = 'matched'
+        else:
+            invalid_reasons[clip_idx] = 'explicit_invalid'
         if gaze_valid[clip_idx] and is_fixation_type(chosen.get('gaze_type'), fixation_values):
             matched_fixations += 1
 
-    if start_frame is None:
+    if start_frame is None and frame_range is None:
         warning_codes.append('missing_clip_start_frame')
     if matched_fixations == 0 and only_fixation:
         warning_codes.append('no_fixation_match')
@@ -1073,6 +1204,10 @@ def align_gaze_to_clip(parsed_gaze: ParsedGazeData,
         gaze_xy=gaze_xy,
         gaze_valid=gaze_valid,
         gaze_type=gaze_type,
+        global_frame_ids=global_frame_ids,
+        matched_frame_ids=matched_frame_ids,
+        rows_found=rows_found,
+        invalid_reasons=invalid_reasons,
         frame_indices=np.arange(total_frames, dtype=np.int32),
         warning_codes=warning_codes,
         matched_fixations=matched_fixations,

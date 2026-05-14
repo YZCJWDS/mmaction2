@@ -8,6 +8,7 @@ import os
 import random
 import sys
 from pathlib import Path
+from collections import Counter
 
 import numpy as np
 
@@ -18,8 +19,8 @@ if REPO_ROOT not in sys.path:
 from projects.egtea_gaze.egtea_gaze.utils import (
     align_gaze_to_clip, build_gaze_file_index, dump_json, get_video_stats,
     match_gaze_file, normalize_xy_array, parse_clip_start_frame,
-    parse_gaze_file, read_video_frame, resolve_source_resolution,
-    resolve_video_path)
+    parse_clip_frame_info, parse_clip_frame_range, parse_gaze_file, read_video_frame,
+    resolve_source_resolution, resolve_video_path)
 from projects.egtea_gaze.egtea_gaze.visualization import (
     draw_gaze_point, draw_text_box, save_image, write_simple_gallery)
 
@@ -79,6 +80,8 @@ def main():
     frames_out_of_source_bounds = 0
     used_source_resolution = None
     used_coordinate_scale_mode = None
+    invalid_reason_counts = Counter()
+    clip_debug = []
 
     print('=' * 80)
     print('Visualize EGTEA Gaze Overlay')
@@ -98,16 +101,34 @@ def main():
             warnings_list.extend(match_warnings)
             if gaze_file is None:
                 clips_missing_gaze += 1
+                invalid_reason_counts['no_gaze_file'] += int(args.frames_per_clip)
                 continue
 
             parsed = parse_gaze_file(gaze_file)
-            start_frame = parse_clip_start_frame(video_path)
+            frame_info = parse_clip_frame_info(video_path)
+            start_frame = frame_info['start_frame'] if frame_info else None
+            end_frame = frame_info['end_frame'] if frame_info else None
+            parse_source = frame_info['parse_source'] if frame_info else 'fallback_local'
+            frame_range = (start_frame, end_frame) if frame_info else parse_clip_frame_range(video_path)
+            gaze_frame_ids = [record['frame_id'] for record in parsed.records if record.get('frame_id') is not None]
+            clip_debug_item = dict(
+                video_name=Path(video_path).name,
+                video_relpath=video_relpath,
+                parsed_start_frame=start_frame,
+                parsed_end_frame=end_frame,
+                parse_source=parse_source,
+                gaze_frame_min=min(gaze_frame_ids) if gaze_frame_ids else None,
+                gaze_frame_max=max(gaze_frame_ids) if gaze_frame_ids else None,
+                sampled_frames=[],
+            )
             aligned = align_gaze_to_clip(
                 parsed,
                 total_frames=total_frames,
                 fps=fps,
                 start_frame=start_frame,
-                only_fixation=args.only_fixation)
+                frame_range=frame_range,
+                only_fixation=args.only_fixation,
+                prefer_fixation=True)
             try:
                 first_frame = read_video_frame(video_path, 0)
             except Exception as exc:
@@ -148,6 +169,7 @@ def main():
                     in_bounds = 0.0 <= float(xy[0]) <= 1.0 and 0.0 <= float(xy[1]) <= 1.0
                     if not bool(source_in_bounds[frame_id]):
                         frames_out_of_source_bounds += 1
+                        invalid_reason_counts['out_of_source_bounds'] += 1
                     event_name = str(aligned['gaze_type'][frame_id])
                     if event_name == 'fixation':
                         frames_fixation += 1
@@ -159,8 +181,11 @@ def main():
                         frames_scaled_into_view += 1
                     else:
                         frames_out_of_bounds += 1
+                        invalid_reason_counts['out_of_image_bounds'] += 1
                 else:
                     frames_invalid += 1
+                    reason = str(aligned['invalid_reasons'][frame_id])
+                    invalid_reason_counts[reason] += 1
                 xy = gaze_xy[frame_id]
                 raw_xy = aligned['gaze_xy'][frame_id]
                 visible = int(
@@ -178,9 +203,23 @@ def main():
                         f'raw_y: {float(raw_xy[1]):.2f}',
                         f'scaled_x: {float(xy[0]):.4f}',
                         f'scaled_y: {float(xy[1]):.4f}',
+                        f'global: {int(aligned["global_frame_ids"][frame_id])}',
+                        f'matched: {int(aligned["matched_frame_ids"][frame_id])}',
+                        f'rows: {int(aligned["rows_found"][frame_id])}',
+                        f'invalid: {aligned["invalid_reasons"][frame_id]}',
                         f'start: {start_frame}',
+                        f'range: {frame_range}',
                     ],
                 )
+                clip_debug_item['sampled_frames'].append(dict(
+                    clip_idx=int(frame_id),
+                    computed_global_frame=int(aligned['global_frame_ids'][frame_id]),
+                    matched_frame=int(aligned['matched_frame_ids'][frame_id]),
+                    rows_found=int(aligned['rows_found'][frame_id]),
+                    valid=int(aligned['gaze_valid'][frame_id]),
+                    visible=int(visible),
+                    invalid_reason=str(aligned['invalid_reasons'][frame_id]),
+                ))
                 output_name = f'{clip_idx:03d}_{Path(video_relpath).stem}_f{int(frame_id):04d}.png'
                 output_path = os.path.join(args.out_dir, output_name)
                 save_image(frame, output_path)
@@ -195,8 +234,17 @@ def main():
                             f'frame_id: {int(frame_id)}\n'
                             f'valid: {int(aligned["gaze_valid"][frame_id])}\n'
                             f'gaze_type: {aligned["gaze_type"][frame_id]}\n'
-                            f'start_frame: {start_frame}'
+                            f'start_frame: {start_frame}\n'
+                            f'frame_range: {frame_range}\n'
+                            f'global_frame: {int(aligned["global_frame_ids"][frame_id])}\n'
+                            f'matched_frame: {int(aligned["matched_frame_ids"][frame_id])}\n'
+                            f'rows_found: {int(aligned["rows_found"][frame_id])}\n'
+                            f'invalid_reason: {aligned["invalid_reasons"][frame_id]}'
                         )))
+            if frames_invalid and all(int(item['valid']) == 0 for item in clip_debug_item['sampled_frames']):
+                if start_frame is None:
+                    invalid_reason_counts['no_start_frame'] += 1
+            clip_debug.append(clip_debug_item)
         except Exception as exc:
             warnings_list.append(f'Clip skipped due to unexpected error: {video_relpath} ({exc})')
             continue
@@ -217,6 +265,8 @@ def main():
         frames_scaled_into_view=frames_scaled_into_view,
         frames_out_of_source_bounds=frames_out_of_source_bounds,
         coordinate_scale_mode=used_coordinate_scale_mode,
+        invalid_reason_counts=dict(invalid_reason_counts),
+        clip_debug=clip_debug,
         valid_ratio=frames_with_valid_gaze / max(1, frames_saved),
         visible_ratio=frames_with_visible_gaze / max(1, frames_with_valid_gaze),
         warnings=sorted(set(warnings_list)),

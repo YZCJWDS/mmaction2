@@ -19,9 +19,9 @@ if REPO_ROOT not in sys.path:
 from projects.egtea_gaze.egtea_gaze.utils import (
     align_gaze_to_clip, build_gaze_file_index, compare_annotation_lists,
     dump_json, ensure_dir, gaze_xy_to_heatmaps, get_video_stats,
-    match_gaze_file, normalize_xy_array, parse_clip_start_frame,
-    parse_gaze_file, resolve_source_resolution, resolve_video_path,
-    safe_path_id, stable_hash)
+    match_gaze_file, normalize_xy_array, parse_clip_frame_range,
+    parse_clip_start_frame, parse_gaze_file, resolve_source_resolution,
+    resolve_video_path, safe_path_id, stable_hash)
 
 
 def parse_args():
@@ -95,11 +95,13 @@ def process_one_sample(video_relpath: str,
     parsed = parse_gaze_file(gaze_file)
     total_frames, fps = get_video_stats(video_path)
     start_frame = parse_clip_start_frame(video_path)
+    frame_range = parse_clip_frame_range(video_path)
     aligned = align_gaze_to_clip(
         parsed,
         total_frames=total_frames,
         fps=fps,
         start_frame=start_frame,
+        frame_range=frame_range,
         only_fixation=only_fixation,
         fixation_values=fixation_values)
 

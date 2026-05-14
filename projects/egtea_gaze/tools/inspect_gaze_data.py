@@ -22,6 +22,8 @@ def parse_args():
     parser.add_argument('--video-root', default='', help='Optional video root for context')
     parser.add_argument('--ann-root', default='', help='Optional annotation root for context')
     parser.add_argument('--max-files', type=int, default=20, help='Maximum files to inspect deeply')
+    parser.add_argument('--focus-file', default='',
+                        help='Optional specific gaze file to inspect first')
     parser.add_argument('--output', required=True, help='Output JSON report path')
     return parser.parse_args()
 
@@ -32,6 +34,12 @@ def main():
     if not gaze_files:
         print(f'[ERROR] No gaze files found under: {args.gaze_root}')
         return 1
+    if args.focus_file:
+        normalized_focus = os.path.normpath(args.focus_file)
+        if normalized_focus in gaze_files:
+            gaze_files = [normalized_focus] + [path for path in gaze_files if path != normalized_focus]
+        else:
+            print(f'[WARN] focus file not found under gaze_root: {args.focus_file}')
 
     gaze_index = build_gaze_file_index(args.gaze_root)
     inspected = []
@@ -59,12 +67,16 @@ def main():
                 delimiter=fmt.delimiter,
                 has_header=fmt.has_header,
                 columns=fmt.columns,
+                encoding=fmt.encoding,
+                header=fmt.header,
+                preview_rows=fmt.preview_rows,
                 coordinate_mode=fmt.coordinate_mode,
                 sampled_rows=fmt.sampled_rows,
                 skipped_rows=fmt.skipped_rows,
                 x_range=fmt.x_range,
                 y_range=fmt.y_range,
                 gaze_type_counts=fmt.gaze_type_counts,
+                validity_counts=fmt.validity_counts,
                 timestamp_unit=parsed.timestamp_unit,
                 warnings=fmt.warnings,
             ))
@@ -76,12 +88,18 @@ def main():
         if fmt.coordinate_mode == 'unknown':
             warnings_list.append(f'Coordinate mode unknown: {path}')
         print(f'[FILE] {path}')
-        print(f'  kind={fmt.kind} delimiter={fmt.delimiter} header={fmt.has_header}')
+        print(f'  kind={fmt.kind} delimiter={fmt.delimiter} header={fmt.has_header} encoding={fmt.encoding}')
+        if fmt.header:
+            print(f'  header={fmt.header}')
+        if fmt.preview_rows:
+            print(f'  preview_rows={fmt.preview_rows[:5]}')
         print(f'  columns={fmt.columns}')
         print(f'  sampled_rows={fmt.sampled_rows} skipped_rows={fmt.skipped_rows}')
         print(f'  coordinate_mode={fmt.coordinate_mode} x_range={fmt.x_range} y_range={fmt.y_range}')
         if fmt.gaze_type_counts:
             print(f'  gaze_types={dict(fmt.gaze_type_counts)}')
+        if fmt.validity_counts:
+            print(f'  validity={dict(fmt.validity_counts)}')
 
     report = dict(
         gaze_root=args.gaze_root,
@@ -99,6 +117,7 @@ def main():
             inspected_files=len(inspected),
         ),
         gaze_type_summary=dict(gaze_type_counts),
+        focus_file=args.focus_file,
         inspected=inspected,
         warnings=sorted(set(warnings_list)),
     )
@@ -112,4 +131,3 @@ def main():
 
 if __name__ == '__main__':
     raise SystemExit(main())
-

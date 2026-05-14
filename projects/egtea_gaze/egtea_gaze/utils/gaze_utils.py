@@ -22,15 +22,19 @@ GAZE_EXTENSIONS = TEXT_EXTENSIONS | {'.json'}
 DEFAULT_FIXATION_VALUES = {'1', 'fix', 'fixation', 'f'}
 HEADER_ALIASES = {
     'frame_id': ('frame', 'frameid', 'frame_idx', 'frameindex', 'framenum',
-                 'frame_no', 'frame_number', 'index', 'idx'),
+                 'frame_no', 'frame_number', 'framenumber', 'index', 'idx'),
     'timestamp': ('timestamp', 'time', 't', 'ts', 'time_ms', 'time_sec',
                   'time_s', 'ms', 'sec', 'seconds'),
     'x': ('x', 'gaze_x', 'gazex', 'pointx', 'point_x', 'xcoord', 'x_coord',
-          'xpix', 'pixelx', 'normx'),
+          'xpix', 'pixelx', 'normx', 'px', 'porx', 'positionx'),
     'y': ('y', 'gaze_y', 'gazey', 'pointy', 'point_y', 'ycoord', 'y_coord',
-          'ypix', 'pixely', 'normy'),
+          'ypix', 'pixely', 'normy', 'py', 'pory', 'positiony'),
     'gaze_type': ('type', 'gaze_type', 'gazetype', 'event', 'event_type',
-                  'fixation', 'label', 'status'),
+                  'fixation', 'label', 'status', 'movement', 'eyemovement'),
+    'validity': ('valid', 'validity', 'isvalid', 'is_valid', 'validflag'),
+    'tracked': ('tracked', 'istracked', 'is_tracked', 'tracking', 'found'),
+    'confidence': ('confidence', 'conf', 'score', 'quality', 'prob',
+                   'probability'),
 }
 
 
@@ -42,6 +46,9 @@ class GazeFormat:
     kind: str
     delimiter: str = 'whitespace'
     has_header: bool = False
+    encoding: str = 'utf-8'
+    header: List[str] = field(default_factory=list)
+    preview_rows: List[List[str]] = field(default_factory=list)
     columns: Dict[str, Optional[int | str]] = field(default_factory=dict)
     coordinate_mode: str = 'unknown'
     warnings: List[str] = field(default_factory=list)
@@ -50,6 +57,7 @@ class GazeFormat:
     x_range: Tuple[Optional[float], Optional[float]] = (None, None)
     y_range: Tuple[Optional[float], Optional[float]] = (None, None)
     gaze_type_counts: Dict[str, int] = field(default_factory=dict)
+    validity_counts: Dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -77,6 +85,14 @@ def ensure_dir(path: str | os.PathLike) -> None:
 
 def normalize_token(value: str) -> str:
     return re.sub(r'[^a-z0-9]+', '', value.lower())
+
+
+def normalized_header_aliases() -> Dict[str, set[str]]:
+    alias_map: Dict[str, set[str]] = {}
+    for field, aliases in HEADER_ALIASES.items():
+        alias_map[field] = {normalize_token(alias) for alias in aliases}
+        alias_map[field].add(normalize_token(field))
+    return alias_map
 
 
 def safe_path_id(value: str) -> str:
@@ -109,6 +125,30 @@ def read_text_lines(path: str,
     if last_error is not None:
         raise last_error
     raise RuntimeError(f'Failed to read text file: {path}')
+
+
+def extract_text_table(lines: Sequence[str]) -> Tuple[List[str], Optional[List[str]], List[List[str]], List[str]]:
+    metadata_lines: List[str] = []
+    content_lines: List[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith('##'):
+            metadata_lines.append(stripped)
+            continue
+        content_lines.append(stripped)
+
+    if not content_lines:
+        return metadata_lines, None, [], []
+
+    delimiter = detect_delimiter(content_lines)
+    first_row = split_text_line(content_lines[0], delimiter)
+    has_header = looks_like_header(first_row)
+    header = first_row if has_header else None
+    row_lines = content_lines[1:] if has_header else content_lines
+    data_rows = [split_text_line(line, delimiter) for line in row_lines]
+    return metadata_lines, header, data_rows, content_lines
 
 
 def iter_text_rows(path: str,
@@ -182,6 +222,24 @@ def maybe_int(value: object) -> Optional[int]:
     return int(round(parsed))
 
 
+def maybe_bool(value: object) -> Optional[bool]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    if text in {'1', '1.0', 'true', 't', 'yes', 'y', 'valid', 'tracked'}:
+        return True
+    if text in {'0', '0.0', 'false', 'f', 'no', 'n', 'invalid', 'untracked'}:
+        return False
+    parsed = maybe_float(text)
+    if parsed is None:
+        return None
+    return parsed > 0
+
+
 def canonicalize_gaze_type(value: object) -> str:
     if value is None:
         return 'unknown'
@@ -191,11 +249,21 @@ def canonicalize_gaze_type(value: object) -> str:
     aliases = {
         '1.0': '1',
         '0.0': '0',
+        '1': '1',
+        '0': '0',
         'fix': 'fixation',
         'fixations': 'fixation',
         'sac': 'saccade',
+        'saccades': 'saccade',
     }
-    return aliases.get(text, text)
+    text = aliases.get(text, text)
+    if 'fixation' in text:
+        return 'fixation'
+    if 'saccade' in text:
+        return 'saccade'
+    if text in {'1', '0', 'unknown'}:
+        return text
+    return 'unknown'
 
 
 def is_fixation_type(value: object,
@@ -209,11 +277,12 @@ def is_fixation_type(value: object,
 def looks_like_header(tokens: Sequence[str]) -> bool:
     if not tokens:
         return False
+    alias_map = normalized_header_aliases()
     numeric_count = sum(maybe_float(token) is not None for token in tokens)
     alpha_hits = 0
     for token in tokens:
         norm = normalize_token(token)
-        if any(norm in aliases for aliases in HEADER_ALIASES.values()):
+        if any(norm in aliases for aliases in alias_map.values()):
             alpha_hits += 2
         elif re.search(r'[a-zA-Z]', token):
             alpha_hits += 1
@@ -225,10 +294,12 @@ def _column_numeric_stats(rows: Sequence[Sequence[str]], idx: int) -> dict:
     numeric = [value for value in values if value is not None]
     if not numeric:
         return dict(ratio=0.0, min=None, max=None, mean=None, monotonic=False,
-                    integer_like=False)
+                    integer_like=False, std=None, near_one_ratio=0.0,
+                    unique_ratio=0.0, unique_count=0)
     monotonic = all(
         numeric[pos] <= numeric[pos + 1] for pos in range(len(numeric) - 1))
     integer_like = all(abs(value - round(value)) < 1e-4 for value in numeric)
+    unique_count = len({round(float(value), 6) for value in numeric})
     return dict(
         ratio=len(numeric) / max(1, len(values)),
         min=min(numeric),
@@ -236,7 +307,99 @@ def _column_numeric_stats(rows: Sequence[Sequence[str]], idx: int) -> dict:
         mean=float(np.mean(numeric)),
         monotonic=monotonic,
         integer_like=integer_like,
+        std=float(np.std(numeric)),
+        near_one_ratio=float(np.mean(np.isclose(numeric, 1.0, atol=1e-6))),
+        unique_ratio=unique_count / max(1, len(numeric)),
+        unique_count=unique_count,
     )
+
+
+def _header_match_score(normalized_name: str, field: str) -> float:
+    aliases = normalized_header_aliases()[field]
+    if field == 'frame_id':
+        if normalized_name == 'frame':
+            return 20.0
+    if field == 'timestamp':
+        if normalized_name == 'time':
+            return 20.0
+    if field == 'x':
+        if normalized_name == 'lporxpx':
+            return 30.0
+        if 'porx' in normalized_name or 'gazex' in normalized_name:
+            return 20.0
+        if normalized_name.endswith('xpx'):
+            return 18.0
+    if field == 'y':
+        if normalized_name == 'lporypx':
+            return 30.0
+        if 'pory' in normalized_name or 'gazey' in normalized_name:
+            return 20.0
+        if normalized_name.endswith('ypx'):
+            return 18.0
+    if field == 'gaze_type':
+        if normalized_name == 'leventinfo':
+            return 30.0
+        if 'eventinfo' in normalized_name:
+            return 24.0
+        if normalized_name in {'gazetype', 'eventtype'}:
+            return 18.0
+        if normalized_name == 'type':
+            return 0.0
+    if normalized_name in aliases:
+        return 10.0
+    if field == 'frame_id' and (
+            normalized_name.startswith('frame') or normalized_name.endswith('frame')):
+        return 8.0
+    if field == 'timestamp' and 'time' in normalized_name:
+        return 8.0
+    if field == 'x':
+        if normalized_name.endswith('x') and any(
+                token in normalized_name for token in ('gaze', 'point', 'coord',
+                                                       'pixel', 'norm', 'por', 'pos')):
+            return 8.0
+        if normalized_name in {'xpos', 'xposition'}:
+            return 8.0
+    if field == 'y':
+        if normalized_name.endswith('y') and any(
+                token in normalized_name for token in ('gaze', 'point', 'coord',
+                                                       'pixel', 'norm', 'por', 'pos')):
+            return 8.0
+        if normalized_name in {'ypos', 'yposition'}:
+            return 8.0
+    if field in {'gaze_type', 'validity', 'tracked', 'confidence'}:
+        token_map = {
+            'gaze_type': ('event', 'fix', 'label', 'status', 'movement'),
+            'validity': ('valid',),
+            'tracked': ('track', 'found'),
+            'confidence': ('conf', 'score', 'quality', 'prob'),
+        }
+        if any(token in normalized_name for token in token_map[field]):
+            return 8.0
+    return 0.0
+
+
+def _textual_values_score(rows: Sequence[Sequence[str]], idx: int, field: str) -> float:
+    values = [str(row[idx]).strip() for row in rows if idx < len(row) and str(row[idx]).strip()]
+    if not values:
+        return 0.0
+    normalized = [canonicalize_gaze_type(value) for value in values]
+    if field == 'gaze_type':
+        event_ratio = float(np.mean([value in {'fixation', 'saccade'} for value in normalized]))
+        smp_ratio = float(np.mean([value == 'smp' for value in normalized]))
+        return event_ratio * 10.0 - smp_ratio * 10.0
+    return 0.0
+
+
+def _is_suspicious_coordinate_column(stat: dict) -> bool:
+    if stat['ratio'] < 0.5:
+        return True
+    if stat['near_one_ratio'] >= 0.95:
+        return True
+    if stat['std'] is not None and stat['std'] <= 1e-6:
+        return True
+    if stat['unique_count'] <= 1:
+        return True
+    return False
 
 
 def infer_columns(header: Optional[Sequence[str]],
@@ -247,6 +410,9 @@ def infer_columns(header: Optional[Sequence[str]],
         'x': None,
         'y': None,
         'gaze_type': None,
+        'validity': None,
+        'tracked': None,
+        'confidence': None,
     }
     if not rows:
         return columns
@@ -255,11 +421,24 @@ def infer_columns(header: Optional[Sequence[str]],
 
     if header:
         normalized_header = [normalize_token(item) for item in header]
-        for field, aliases in HEADER_ALIASES.items():
+        for field in columns:
+            scored = []
             for idx, name in enumerate(normalized_header):
-                if name in aliases:
-                    columns[field] = idx
-                    break
+                score = _header_match_score(name, field)
+                if field == 'gaze_type':
+                    score += _textual_values_score(rows, idx, field)
+                if score > 0:
+                    scored.append((score, idx))
+            if scored:
+                scored.sort(reverse=True)
+                columns[field] = scored[0][1]
+
+    for field in ('x', 'y'):
+        idx = columns[field]
+        if idx is not None:
+            stat = _column_numeric_stats(rows, idx)
+            if _is_suspicious_coordinate_column(stat):
+                columns[field] = None
 
     monotonic_candidates = [
         idx for idx, stat in enumerate(stats)
@@ -270,48 +449,55 @@ def infer_columns(header: Optional[Sequence[str]],
             if stats[idx]['integer_like']:
                 columns['frame_id'] = idx
                 break
-    if columns['timestamp'] is None:
+    if columns['timestamp'] is None and not header:
         for idx in monotonic_candidates:
             if idx != columns['frame_id']:
                 columns['timestamp'] = idx
                 break
 
     coord_scores = []
+    blocked_coordinate_columns = {
+        idx for key, idx in columns.items()
+        if key in {'gaze_type', 'validity', 'tracked', 'confidence'} and idx is not None
+    }
     for idx, stat in enumerate(stats):
         if stat['ratio'] < 0.8:
             continue
-        if idx in (columns['frame_id'], columns['timestamp']):
+        if idx in (columns['frame_id'], columns['timestamp']) or idx in blocked_coordinate_columns:
             continue
         score = 0.0
         min_v, max_v = stat['min'], stat['max']
         if min_v is None or max_v is None:
             continue
+        if _is_suspicious_coordinate_column(stat):
+            score -= 10.0
         if -0.25 <= min_v <= 1.25 and -0.25 <= max_v <= 1.25:
             score += 4.0
         if -5 <= min_v <= 8192 and 0 <= max_v <= 8192:
             score += 1.5
         if not stat['monotonic']:
             score += 0.5
+        if stat['unique_ratio'] > 0.05:
+            score += 1.0
         coord_scores.append((score, idx))
     coord_scores.sort(reverse=True)
 
-    if columns['x'] is None and coord_scores:
-        columns['x'] = coord_scores[0][1]
+    if columns['x'] is None:
+        for score, idx in coord_scores:
+            if score > 0:
+                columns['x'] = idx
+                break
     if columns['y'] is None:
-        for _, idx in coord_scores[1:]:
+        for score, idx in coord_scores:
+            if score <= 0:
+                continue
             if idx != columns['x']:
                 columns['y'] = idx
                 break
     if columns['y'] is None and columns['x'] is not None:
         fallback = columns['x'] + 1
-        if fallback < max_cols:
+        if fallback < max_cols and fallback not in blocked_coordinate_columns:
             columns['y'] = fallback
-
-    if columns['gaze_type'] is None and header:
-        for idx, name in enumerate(normalized_header):
-            if any(token in name for token in ('type', 'event', 'label')):
-                columns['gaze_type'] = idx
-                break
 
     return columns
 
@@ -333,6 +519,19 @@ def detect_coordinate_mode(x_values: Sequence[float],
     return 'unknown'
 
 
+def record_is_explicitly_valid(record: dict) -> bool:
+    validity = record.get('validity')
+    tracked = record.get('tracked')
+    confidence = record.get('confidence')
+    if validity is not None and not validity:
+        return False
+    if tracked is not None and not tracked:
+        return False
+    if confidence is not None and confidence <= 0.0:
+        return False
+    return True
+
+
 def detect_timestamp_unit(timestamps: Sequence[float]) -> str:
     if len(timestamps) < 2:
         return 'unknown'
@@ -348,16 +547,13 @@ def detect_timestamp_unit(timestamps: Sequence[float]) -> str:
 
 def parse_text_gaze_file(path: str,
                          max_records: Optional[int] = None) -> ParsedGazeData:
-    lines, _ = read_text_lines(path, max_lines=(max_records or 2000))
+    lines, encoding = read_text_lines(path, max_lines=(max_records or 2000))
     if not lines:
         fmt = GazeFormat(path=path, kind='text', warnings=['empty file'])
         return ParsedGazeData(path=path, records=[], gaze_format=fmt)
-    delimiter = detect_delimiter(lines)
-    first_row = split_text_line(lines[0], delimiter)
-    has_header = looks_like_header(first_row)
-    header = first_row if has_header else None
-    row_lines = lines[1:] if has_header else lines
-    data_rows = [split_text_line(line, delimiter) for line in row_lines]
+    metadata_lines, header, data_rows, content_lines = extract_text_table(lines)
+    delimiter = detect_delimiter(content_lines)
+    has_header = header is not None
     columns = infer_columns(header, data_rows)
 
     records: List[dict] = []
@@ -365,7 +561,9 @@ def parse_text_gaze_file(path: str,
     x_values: List[float] = []
     y_values: List[float] = []
     gaze_type_counts: Counter[str] = Counter()
+    validity_counts: Counter[str] = Counter()
     timestamps: List[float] = []
+    warnings_list: List[str] = []
 
     for row in data_rows:
         try:
@@ -380,34 +578,68 @@ def parse_text_gaze_file(path: str,
                 if columns['timestamp'] is not None and columns['timestamp'] < len(row) else None
             gaze_type = canonicalize_gaze_type(
                 row[columns['gaze_type']]) if columns['gaze_type'] is not None and columns['gaze_type'] < len(row) else 'unknown'
+            validity = maybe_bool(
+                row[columns['validity']]) if columns['validity'] is not None and columns['validity'] < len(row) else None
+            tracked = maybe_bool(
+                row[columns['tracked']]) if columns['tracked'] is not None and columns['tracked'] < len(row) else None
+            confidence = maybe_float(
+                row[columns['confidence']]) if columns['confidence'] is not None and columns['confidence'] < len(row) else None
             record = dict(
                 frame_id=frame_id,
                 timestamp=timestamp,
                 x=x,
                 y=y,
                 gaze_type=gaze_type,
+                validity=validity,
+                tracked=tracked,
+                confidence=confidence,
             )
             records.append(record)
             x_values.append(x)
             y_values.append(y)
             gaze_type_counts[gaze_type] += 1
+            validity_counts['valid' if record_is_explicitly_valid(record) else 'invalid'] += 1
             if timestamp is not None:
                 timestamps.append(timestamp)
         except Exception:
             skipped += 1
+
+    x_stats = _column_numeric_stats(data_rows, columns['x']) if columns['x'] is not None else {}
+    y_stats = _column_numeric_stats(data_rows, columns['y']) if columns['y'] is not None else {}
+    if columns['x'] is None or columns['y'] is None:
+        warnings_list.append('x_or_y_column_missing')
+    if x_stats and _is_suspicious_coordinate_column(x_stats):
+        warnings_list.append('x_column_suspicious')
+    if y_stats and _is_suspicious_coordinate_column(y_stats):
+        warnings_list.append('y_column_suspicious')
+    if x_stats.get('near_one_ratio', 0.0) >= 0.95:
+        warnings_list.append('x_column_nearly_constant_one')
+    if y_stats.get('near_one_ratio', 0.0) >= 0.95:
+        warnings_list.append('y_column_nearly_constant_one')
+    if columns['gaze_type'] is None:
+        warnings_list.append('gaze_type_column_missing')
+    if columns['validity'] is None and columns['tracked'] is None and columns['confidence'] is None:
+        warnings_list.append('no_validity_confidence_columns')
+    if metadata_lines:
+        warnings_list.append('metadata_lines_skipped')
 
     fmt = GazeFormat(
         path=path,
         kind='text',
         delimiter=delimiter,
         has_header=has_header,
+        encoding=encoding,
+        header=list(header) if header else [],
+        preview_rows=[list(row) for row in data_rows[:5]],
         columns=columns,
         coordinate_mode=detect_coordinate_mode(x_values, y_values),
+        warnings=warnings_list,
         sampled_rows=len(records),
         skipped_rows=skipped,
         x_range=(min(x_values), max(x_values)) if x_values else (None, None),
         y_range=(min(y_values), max(y_values)) if y_values else (None, None),
         gaze_type_counts=dict(gaze_type_counts),
+        validity_counts=dict(validity_counts),
     )
     return ParsedGazeData(
         path=path,
@@ -440,26 +672,42 @@ def parse_json_gaze_file(path: str,
     x_key = None
     y_key = None
     gaze_type_key = None
+    validity_key = None
+    tracked_key = None
+    confidence_key = None
     if normalized_keys:
-        for alias in HEADER_ALIASES['frame_id']:
+        alias_map = normalized_header_aliases()
+        for alias in alias_map['frame_id']:
             if alias in normalized_keys:
                 frame_key = normalized_keys[alias]
                 break
-        for alias in HEADER_ALIASES['timestamp']:
+        for alias in alias_map['timestamp']:
             if alias in normalized_keys:
                 time_key = normalized_keys[alias]
                 break
-        for alias in HEADER_ALIASES['x']:
+        for alias in alias_map['x']:
             if alias in normalized_keys:
                 x_key = normalized_keys[alias]
                 break
-        for alias in HEADER_ALIASES['y']:
+        for alias in alias_map['y']:
             if alias in normalized_keys:
                 y_key = normalized_keys[alias]
                 break
-        for alias in HEADER_ALIASES['gaze_type']:
+        for alias in alias_map['gaze_type']:
             if alias in normalized_keys:
                 gaze_type_key = normalized_keys[alias]
+                break
+        for alias in alias_map['validity']:
+            if alias in normalized_keys:
+                validity_key = normalized_keys[alias]
+                break
+        for alias in alias_map['tracked']:
+            if alias in normalized_keys:
+                tracked_key = normalized_keys[alias]
+                break
+        for alias in alias_map['confidence']:
+            if alias in normalized_keys:
+                confidence_key = normalized_keys[alias]
                 break
 
     records: List[dict] = []
@@ -467,6 +715,7 @@ def parse_json_gaze_file(path: str,
     x_values: List[float] = []
     y_values: List[float] = []
     gaze_type_counts: Counter[str] = Counter()
+    validity_counts: Counter[str] = Counter()
     timestamps: List[float] = []
     for item in sampled:
         if not isinstance(item, dict):
@@ -481,12 +730,17 @@ def parse_json_gaze_file(path: str,
         timestamp = maybe_float(item.get(time_key)) if time_key else None
         gaze_type = canonicalize_gaze_type(item.get(gaze_type_key)) \
             if gaze_type_key else 'unknown'
+        validity = maybe_bool(item.get(validity_key)) if validity_key else None
+        tracked = maybe_bool(item.get(tracked_key)) if tracked_key else None
+        confidence = maybe_float(item.get(confidence_key)) if confidence_key else None
         records.append(
             dict(frame_id=frame_id, timestamp=timestamp, x=x, y=y,
-                 gaze_type=gaze_type))
+                 gaze_type=gaze_type, validity=validity, tracked=tracked,
+                 confidence=confidence))
         x_values.append(x)
         y_values.append(y)
         gaze_type_counts[gaze_type] += 1
+        validity_counts['valid' if record_is_explicitly_valid(records[-1]) else 'invalid'] += 1
         if timestamp is not None:
             timestamps.append(timestamp)
 
@@ -501,6 +755,9 @@ def parse_json_gaze_file(path: str,
             x=x_key,
             y=y_key,
             gaze_type=gaze_type_key,
+            validity=validity_key,
+            tracked=tracked_key,
+            confidence=confidence_key,
         ),
         coordinate_mode=detect_coordinate_mode(x_values, y_values),
         sampled_rows=len(records),
@@ -508,6 +765,7 @@ def parse_json_gaze_file(path: str,
         x_range=(min(x_values), max(x_values)) if x_values else (None, None),
         y_range=(min(y_values), max(y_values)) if y_values else (None, None),
         gaze_type_counts=dict(gaze_type_counts),
+        validity_counts=dict(validity_counts),
     )
     return ParsedGazeData(
         path=path,
@@ -675,8 +933,9 @@ def pick_record_for_frame(records: Sequence[dict],
             item for item in records
             if is_fixation_type(item.get('gaze_type'), fixation_values)
         ]
-        if filtered:
-            records = filtered
+        if not filtered:
+            return None
+        records = filtered
     return records[0]
 
 
@@ -740,9 +999,10 @@ def align_gaze_to_clip(parsed_gaze: ParsedGazeData,
             continue
         gaze_xy[clip_idx, 0] = float(chosen['x'])
         gaze_xy[clip_idx, 1] = float(chosen['y'])
-        gaze_valid[clip_idx] = 1
         gaze_type[clip_idx] = canonicalize_gaze_type(chosen.get('gaze_type'))
-        if is_fixation_type(chosen.get('gaze_type'), fixation_values):
+        if record_is_explicitly_valid(chosen):
+            gaze_valid[clip_idx] = 1
+        if gaze_valid[clip_idx] and is_fixation_type(chosen.get('gaze_type'), fixation_values):
             matched_fixations += 1
 
     if start_frame is None:

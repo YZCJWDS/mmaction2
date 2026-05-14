@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 
 def ensure_uint8_rgb(image: np.ndarray) -> np.ndarray:
@@ -57,8 +57,8 @@ def blend_heatmap_on_rgb(image: np.ndarray,
 
 def draw_gaze_point(image: np.ndarray,
                     xy_norm: Sequence[float],
-                    radius: int = 7,
-                    color: Tuple[int, int, int] = (255, 80, 80),
+                    radius: int = 10,
+                    color: Tuple[int, int, int] = (255, 32, 32),
                     outline: Tuple[int, int, int] = (255, 255, 255)
                     ) -> np.ndarray:
     rgb = ensure_uint8_rgb(image)
@@ -66,8 +66,35 @@ def draw_gaze_point(image: np.ndarray,
     y = float(xy_norm[1]) * max(rgb.shape[0] - 1, 1)
     pil_image = Image.fromarray(rgb)
     draw = ImageDraw.Draw(pil_image)
+    cross = radius + 6
+    draw.line((x - cross, y, x + cross, y), fill=outline, width=3)
+    draw.line((x, y - cross, x, y + cross), fill=outline, width=3)
     draw.ellipse((x - radius, y - radius, x + radius, y + radius),
-                 fill=color, outline=outline, width=2)
+                 fill=color, outline=outline, width=3)
+    return np.asarray(pil_image)
+
+
+def draw_text_box(image: np.ndarray,
+                  lines: Sequence[str],
+                  anchor: Tuple[int, int] = (8, 8),
+                  text_fill: Tuple[int, int, int] = (255, 255, 255),
+                  box_fill: Tuple[int, int, int] = (0, 0, 0),
+                  box_outline: Tuple[int, int, int] = (255, 255, 255)
+                  ) -> np.ndarray:
+    rgb = ensure_uint8_rgb(image)
+    pil_image = Image.fromarray(rgb)
+    draw = ImageDraw.Draw(pil_image)
+    font = ImageFont.load_default()
+    text = '\n'.join(lines)
+    left, top = anchor
+    bbox = draw.multiline_textbbox((left, top), text, font=font, spacing=2)
+    pad = 4
+    draw.rectangle(
+        (bbox[0] - pad, bbox[1] - pad, bbox[2] + pad, bbox[3] + pad),
+        fill=box_fill,
+        outline=box_outline,
+        width=1)
+    draw.multiline_text((left, top), text, fill=text_fill, font=font, spacing=2)
     return np.asarray(pil_image)
 
 
@@ -108,4 +135,3 @@ def write_simple_gallery(items: Iterable[dict], output_html: str,
     Path(output_html).parent.mkdir(parents=True, exist_ok=True)
     with open(output_html, 'w', encoding='utf-8') as handle:
         handle.write('\n'.join(rows))
-

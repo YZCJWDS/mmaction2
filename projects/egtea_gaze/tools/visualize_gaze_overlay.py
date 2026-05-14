@@ -19,9 +19,8 @@ from projects.egtea_gaze.egtea_gaze.utils import (
     align_gaze_to_clip, build_gaze_file_index, dump_json, get_video_stats,
     match_gaze_file, normalize_xy_array, parse_clip_start_frame,
     parse_gaze_file, read_video_frame, resolve_video_path)
-from projects.egtea_gaze.egtea_gaze.visualization import (draw_gaze_point,
-                                                          save_image,
-                                                          write_simple_gallery)
+from projects.egtea_gaze.egtea_gaze.visualization import (
+    draw_gaze_point, draw_text_box, save_image, write_simple_gallery)
 
 
 def parse_args():
@@ -65,6 +64,11 @@ def main():
     frames_saved = 0
     clips_missing_gaze = 0
     frames_with_valid_gaze = 0
+    frames_with_visible_gaze = 0
+    frames_out_of_bounds = 0
+    frames_invalid = 0
+    frames_fixation = 0
+    frames_saccade = 0
 
     print('=' * 80)
     print('Visualize EGTEA Gaze Overlay')
@@ -111,8 +115,38 @@ def main():
                         f'Frame decode failed: {video_path} frame={int(frame_id)} ({exc})')
                     continue
                 if aligned['gaze_valid'][frame_id]:
-                    frame = draw_gaze_point(frame, gaze_xy[frame_id], radius=7)
                     frames_with_valid_gaze += 1
+                    xy = gaze_xy[frame_id]
+                    in_bounds = 0.0 <= float(xy[0]) <= 1.0 and 0.0 <= float(xy[1]) <= 1.0
+                    event_name = str(aligned['gaze_type'][frame_id])
+                    if event_name == 'fixation':
+                        frames_fixation += 1
+                    elif event_name == 'saccade':
+                        frames_saccade += 1
+                    if in_bounds:
+                        frame = draw_gaze_point(frame, xy, radius=10)
+                        frames_with_visible_gaze += 1
+                    else:
+                        frames_out_of_bounds += 1
+                else:
+                    frames_invalid += 1
+                xy = gaze_xy[frame_id]
+                visible = int(
+                    aligned['gaze_valid'][frame_id] and
+                    0.0 <= float(xy[0]) <= 1.0 and
+                    0.0 <= float(xy[1]) <= 1.0)
+                frame = draw_text_box(
+                    frame,
+                    lines=[
+                        f'frame: {int(frame_id)}',
+                        f'valid: {int(aligned["gaze_valid"][frame_id])}',
+                        f'visible: {visible}',
+                        f'type: {aligned["gaze_type"][frame_id]}',
+                        f'x: {float(xy[0]):.4f}',
+                        f'y: {float(xy[1]):.4f}',
+                        f'start: {start_frame}',
+                    ],
+                )
                 output_name = f'{clip_idx:03d}_{Path(video_relpath).stem}_f{int(frame_id):04d}.png'
                 output_path = os.path.join(args.out_dir, output_name)
                 save_image(frame, output_path)
@@ -140,6 +174,13 @@ def main():
         frames_saved=frames_saved,
         clips_missing_gaze=clips_missing_gaze,
         frames_with_valid_gaze=frames_with_valid_gaze,
+        frames_with_visible_gaze=frames_with_visible_gaze,
+        frames_out_of_bounds=frames_out_of_bounds,
+        frames_invalid=frames_invalid,
+        frames_fixation=frames_fixation,
+        frames_saccade=frames_saccade,
+        valid_ratio=frames_with_valid_gaze / max(1, frames_saved),
+        visible_ratio=frames_with_visible_gaze / max(1, frames_with_valid_gaze),
         warnings=sorted(set(warnings_list)),
     )
     dump_json(summary, os.path.join(args.out_dir, 'summary.json'))

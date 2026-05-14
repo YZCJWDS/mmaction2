@@ -1,5 +1,3 @@
-import os
-
 _base_ = [
     '../../../configs/_base_/default_runtime.py',
 ]
@@ -13,11 +11,11 @@ custom_imports = dict(
     ],
     allow_failed_imports=False)
 
-gaze_map_root = os.getenv('EGTEA_GAZE_MAP_ROOT', '/root/data/egtea/gaze_maps')
-gaze_metadata_file = os.path.join(gaze_map_root, 'metadata.json')
-slowfast_init_ckpt = os.getenv(
-    'EGTEA_SLOWFAST_CKPT',
-    '/root/outputs/egtea_gaze/slowfast_r50_bs24_amp_25ep/best_acc_top1_epoch_24.pth')
+gaze_map_root = '/root/data/egtea/gaze_maps'
+gaze_metadata_file = '/root/data/egtea/gaze_maps/metadata.json'
+slowfast_init_ckpt = (
+    '/root/outputs/egtea_gaze/slowfast_r50_bs24_amp_25ep/'
+    'best_acc_top1_epoch_24.pth')
 
 model = dict(
     type='GazeRecognizer3D',
@@ -208,4 +206,3 @@ default_hooks = dict(
 
 env_cfg = dict(cudnn_benchmark=True)
 load_from = slowfast_init_ckpt
-

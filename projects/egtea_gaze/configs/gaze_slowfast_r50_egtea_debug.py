@@ -1,9 +1,7 @@
-import os
-
 _base_ = ['./gaze_slowfast_r50_egtea.py']
 
-gaze_map_root = os.getenv('EGTEA_GAZE_MAP_ROOT', '/root/data/egtea/gaze_maps')
-gaze_metadata_file = os.path.join(gaze_map_root, 'metadata.json')
+gaze_map_root = '/root/data/egtea/gaze_maps'
+gaze_metadata_file = '/root/data/egtea/gaze_maps/metadata.json'
 algorithm_keys = ('gaze_maps', 'gaze_valid', 'gaze_xy', 'gaze_source')
 
 train_pipeline = [

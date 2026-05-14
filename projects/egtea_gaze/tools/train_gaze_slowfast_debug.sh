@@ -20,8 +20,6 @@ export PYTHONPATH="$REPO_DIR:$PYTHONPATH"
 [ -f "$GAZE_METADATA" ] || { echo "[ERROR] missing gaze metadata: $GAZE_METADATA"; exit 1; }
 [ -f "$SLOWFAST_CKPT" ] || { echo "[ERROR] missing slowfast checkpoint: $SLOWFAST_CKPT"; exit 1; }
 
-export EGTEA_GAZE_MAP_ROOT="$GAZE_MAP_ROOT"
-export EGTEA_SLOWFAST_CKPT="$SLOWFAST_CKPT"
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 
@@ -36,5 +34,7 @@ CUDA_VISIBLE_DEVICES="${GPUT}" python tools/train.py "$CONFIG" \
   train_dataloader.prefetch_factor="${PREFETCH}" \
   val_dataloader.prefetch_factor="${PREFETCH}" \
   test_dataloader.prefetch_factor="${PREFETCH}" \
+  train_dataloader.dataset.pipeline.6.gaze_map_root="${GAZE_MAP_ROOT}" \
+  train_dataloader.dataset.pipeline.6.metadata_file="${GAZE_METADATA}" \
+  load_from="${SLOWFAST_CKPT}" \
   env_cfg.cudnn_benchmark=True
-

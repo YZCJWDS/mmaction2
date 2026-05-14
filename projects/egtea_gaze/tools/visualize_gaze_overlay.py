@@ -19,8 +19,8 @@ if REPO_ROOT not in sys.path:
 from projects.egtea_gaze.egtea_gaze.utils import (
     align_gaze_to_clip, build_gaze_file_index, dump_json, get_video_stats,
     match_gaze_file, normalize_xy_array, parse_clip_start_frame,
-    parse_clip_frame_info, parse_clip_frame_range, parse_gaze_file, read_video_frame,
-    resolve_source_resolution, resolve_video_path)
+    parse_clip_frame_info, parse_clip_frame_range, parse_gaze_file_full,
+    read_video_frame, resolve_source_resolution, resolve_video_path)
 from projects.egtea_gaze.egtea_gaze.visualization import (
     draw_gaze_point, draw_text_box, save_image, write_simple_gallery)
 
@@ -104,7 +104,7 @@ def main():
                 invalid_reason_counts['no_gaze_file'] += int(args.frames_per_clip)
                 continue
 
-            parsed = parse_gaze_file(gaze_file)
+            parsed = parse_gaze_file_full(gaze_file)
             frame_info = parse_clip_frame_info(video_path)
             start_frame = frame_info['start_frame'] if frame_info else None
             end_frame = frame_info['end_frame'] if frame_info else None
@@ -117,6 +117,8 @@ def main():
                 parsed_start_frame=start_frame,
                 parsed_end_frame=end_frame,
                 parse_source=parse_source,
+                num_gaze_rows_total=len(parsed.records),
+                num_gaze_frames_total=len(set(gaze_frame_ids)),
                 gaze_frame_min=min(gaze_frame_ids) if gaze_frame_ids else None,
                 gaze_frame_max=max(gaze_frame_ids) if gaze_frame_ids else None,
                 sampled_frames=[],

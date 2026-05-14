@@ -6,6 +6,7 @@ from .gaze_utils import (GazeFileIndex, GazeFormat, ParsedGazeData,
                          detect_coordinate_mode, dump_json, ensure_dir,
                          find_gaze_files, gaze_xy_to_heatmaps, get_video_stats,
                          match_gaze_file, normalize_xy_array,
+                         parse_gaze_file_full, parse_gaze_file_sample,
                          parse_clip_frame_info, parse_clip_frame_range,
                          parse_clip_start_frame, parse_gaze_file,
                          read_video_frame, resolve_source_resolution,
@@ -18,6 +19,7 @@ __all__ = [
     'ensure_dir', 'find_gaze_files', 'gaze_xy_to_heatmaps', 'get_video_stats',
     'match_gaze_file', 'normalize_xy_array', 'parse_clip_frame_info',
     'parse_clip_frame_range', 'parse_clip_start_frame', 'parse_gaze_file',
-    'read_video_frame', 'resolve_video_path', 'resolve_source_resolution',
-    'safe_path_id', 'stable_hash'
+    'parse_gaze_file_full', 'parse_gaze_file_sample', 'read_video_frame',
+    'resolve_video_path', 'resolve_source_resolution', 'safe_path_id',
+    'stable_hash'
 ]

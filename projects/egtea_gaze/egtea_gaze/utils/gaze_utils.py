@@ -599,7 +599,7 @@ def detect_timestamp_unit(timestamps: Sequence[float]) -> str:
 
 def parse_text_gaze_file(path: str,
                          max_records: Optional[int] = None) -> ParsedGazeData:
-    lines, encoding = read_text_lines(path, max_lines=(max_records or 2000))
+    lines, encoding = read_text_lines(path, max_lines=max_records)
     if not lines:
         fmt = GazeFormat(path=path, kind='text', warnings=['empty file'])
         return ParsedGazeData(path=path, records=[], gaze_format=fmt)
@@ -835,13 +835,30 @@ def parse_json_gaze_file(path: str,
     )
 
 
-@lru_cache(maxsize=512)
-def parse_gaze_file(path: str,
-                    max_records: Optional[int] = None) -> ParsedGazeData:
+def _parse_gaze_file_impl(path: str,
+                          max_records: Optional[int] = None) -> ParsedGazeData:
     ext = Path(path).suffix.lower()
     if ext == '.json':
         return parse_json_gaze_file(path, max_records=max_records)
     return parse_text_gaze_file(path, max_records=max_records)
+
+
+@lru_cache(maxsize=512)
+def parse_gaze_file_sample(path: str,
+                           max_rows: int = 2000) -> ParsedGazeData:
+    return _parse_gaze_file_impl(path, max_records=max_rows)
+
+
+@lru_cache(maxsize=512)
+def parse_gaze_file_full(path: str) -> ParsedGazeData:
+    return _parse_gaze_file_impl(path, max_records=None)
+
+
+def parse_gaze_file(path: str,
+                    max_records: Optional[int] = None) -> ParsedGazeData:
+    if max_records is None:
+        return parse_gaze_file_full(path)
+    return parse_gaze_file_sample(path, max_rows=int(max_records))
 
 
 def find_gaze_files(gaze_root: str) -> List[str]:
@@ -1113,12 +1130,14 @@ def align_gaze_to_clip(parsed_gaze: ParsedGazeData,
             return None, None, 0, 'no_matching_frame'
         best_frame = min(candidate_ids, key=lambda item: abs(item - target_frame))
         if abs(best_frame - target_frame) > int(frame_match_tolerance):
-            return None, best_frame, len(frame_to_records.get(best_frame, [])), 'no_matching_frame'
+            return None, None, 0, 'no_matching_frame'
         chosen, reason = choose_record_for_frame(
             frame_to_records.get(best_frame, []),
             fixation_only=only_fixation,
             prefer_fixation=prefer_fixation,
             fixation_values=fixation_values)
+        if chosen is None:
+            return None, best_frame, len(frame_to_records.get(best_frame, [])), reason
         return chosen, best_frame, len(frame_to_records.get(best_frame, [])), reason
 
     for clip_idx in range(total_frames):

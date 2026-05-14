@@ -13,7 +13,7 @@ if REPO_ROOT not in sys.path:
 
 from projects.egtea_gaze.egtea_gaze.utils import (build_gaze_file_index,
                                                    dump_json, find_gaze_files,
-                                                   parse_gaze_file)
+                                                   parse_gaze_file_sample)
 
 
 def parse_args():
@@ -58,7 +58,7 @@ def main():
     print('-' * 80)
 
     for path in gaze_files[:args.max_files]:
-        parsed = parse_gaze_file(path, max_records=2000)
+        parsed = parse_gaze_file_sample(path, max_rows=2000)
         fmt = parsed.gaze_format
         inspected.append(
             dict(

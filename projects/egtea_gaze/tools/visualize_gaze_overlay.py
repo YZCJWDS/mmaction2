@@ -18,7 +18,8 @@ if REPO_ROOT not in sys.path:
 from projects.egtea_gaze.egtea_gaze.utils import (
     align_gaze_to_clip, build_gaze_file_index, dump_json, get_video_stats,
     match_gaze_file, normalize_xy_array, parse_clip_start_frame,
-    parse_gaze_file, read_video_frame, resolve_video_path)
+    parse_gaze_file, read_video_frame, resolve_source_resolution,
+    resolve_video_path)
 from projects.egtea_gaze.egtea_gaze.visualization import (
     draw_gaze_point, draw_text_box, save_image, write_simple_gallery)
 
@@ -34,6 +35,11 @@ def parse_args():
     parser.add_argument('--frames-per-clip', type=int, default=5)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--only-fixation', action='store_true')
+    parser.add_argument('--gaze-source-width', type=float, default=None)
+    parser.add_argument('--gaze-source-height', type=float, default=None)
+    parser.add_argument('--auto-scale-gaze', dest='auto_scale_gaze', action='store_true')
+    parser.add_argument('--no-auto-scale-gaze', dest='auto_scale_gaze', action='store_false')
+    parser.set_defaults(auto_scale_gaze=True)
     return parser.parse_args()
 
 
@@ -69,6 +75,10 @@ def main():
     frames_invalid = 0
     frames_fixation = 0
     frames_saccade = 0
+    frames_scaled_into_view = 0
+    frames_out_of_source_bounds = 0
+    used_source_resolution = None
+    used_coordinate_scale_mode = None
 
     print('=' * 80)
     print('Visualize EGTEA Gaze Overlay')
@@ -104,8 +114,26 @@ def main():
                 warnings_list.append(f'First frame decode failed: {video_path} ({exc})')
                 continue
             image_size = (first_frame.shape[1], first_frame.shape[0])
-            gaze_xy = normalize_xy_array(
-                aligned['gaze_xy'], parsed.gaze_format.coordinate_mode, image_size)
+            fallback_resolution = image_size if parsed.gaze_format.coordinate_mode == 'pixel' else None
+            source_resolution, source_resolution_mode = resolve_source_resolution(
+                parsed.gaze_format,
+                override_width=args.gaze_source_width,
+                override_height=args.gaze_source_height,
+                fallback_resolution=fallback_resolution if args.auto_scale_gaze else None)
+            if not args.auto_scale_gaze and parsed.gaze_format.coordinate_mode == 'pixel':
+                source_resolution = (None, None)
+                source_resolution_mode = 'disabled'
+            gaze_xy, source_in_bounds, coordinate_scale_mode = normalize_xy_array(
+                aligned['gaze_xy'],
+                parsed.gaze_format.coordinate_mode,
+                image_size,
+                source_resolution=source_resolution,
+                clip=False,
+                return_info=True)
+            if used_source_resolution is None:
+                used_source_resolution = list(source_resolution)
+            if used_coordinate_scale_mode is None:
+                used_coordinate_scale_mode = coordinate_scale_mode
             frame_ids = sample_frame_indices(total_frames, args.frames_per_clip)
             for frame_id in frame_ids:
                 try:
@@ -118,6 +146,8 @@ def main():
                     frames_with_valid_gaze += 1
                     xy = gaze_xy[frame_id]
                     in_bounds = 0.0 <= float(xy[0]) <= 1.0 and 0.0 <= float(xy[1]) <= 1.0
+                    if not bool(source_in_bounds[frame_id]):
+                        frames_out_of_source_bounds += 1
                     event_name = str(aligned['gaze_type'][frame_id])
                     if event_name == 'fixation':
                         frames_fixation += 1
@@ -126,11 +156,13 @@ def main():
                     if in_bounds:
                         frame = draw_gaze_point(frame, xy, radius=10)
                         frames_with_visible_gaze += 1
+                        frames_scaled_into_view += 1
                     else:
                         frames_out_of_bounds += 1
                 else:
                     frames_invalid += 1
                 xy = gaze_xy[frame_id]
+                raw_xy = aligned['gaze_xy'][frame_id]
                 visible = int(
                     aligned['gaze_valid'][frame_id] and
                     0.0 <= float(xy[0]) <= 1.0 and
@@ -142,8 +174,10 @@ def main():
                         f'valid: {int(aligned["gaze_valid"][frame_id])}',
                         f'visible: {visible}',
                         f'type: {aligned["gaze_type"][frame_id]}',
-                        f'x: {float(xy[0]):.4f}',
-                        f'y: {float(xy[1]):.4f}',
+                        f'raw_x: {float(raw_xy[0]):.2f}',
+                        f'raw_y: {float(raw_xy[1]):.2f}',
+                        f'scaled_x: {float(xy[0]):.4f}',
+                        f'scaled_y: {float(xy[1]):.4f}',
                         f'start: {start_frame}',
                     ],
                 )
@@ -179,6 +213,10 @@ def main():
         frames_invalid=frames_invalid,
         frames_fixation=frames_fixation,
         frames_saccade=frames_saccade,
+        gaze_source_resolution=used_source_resolution,
+        frames_scaled_into_view=frames_scaled_into_view,
+        frames_out_of_source_bounds=frames_out_of_source_bounds,
+        coordinate_scale_mode=used_coordinate_scale_mode,
         valid_ratio=frames_with_valid_gaze / max(1, frames_saved),
         visible_ratio=frames_with_visible_gaze / max(1, frames_with_valid_gaze),
         warnings=sorted(set(warnings_list)),

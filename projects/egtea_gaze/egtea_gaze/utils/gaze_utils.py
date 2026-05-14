@@ -47,6 +47,7 @@ class GazeFormat:
     delimiter: str = 'whitespace'
     has_header: bool = False
     encoding: str = 'utf-8'
+    metadata_lines: List[str] = field(default_factory=list)
     header: List[str] = field(default_factory=list)
     preview_rows: List[List[str]] = field(default_factory=list)
     columns: Dict[str, Optional[int | str]] = field(default_factory=dict)
@@ -58,6 +59,8 @@ class GazeFormat:
     y_range: Tuple[Optional[float], Optional[float]] = (None, None)
     gaze_type_counts: Dict[str, int] = field(default_factory=dict)
     validity_counts: Dict[str, int] = field(default_factory=dict)
+    source_resolution: Tuple[Optional[int], Optional[int]] = (None, None)
+    out_of_source_bounds_ratio: Optional[float] = None
 
 
 @dataclass
@@ -149,6 +152,55 @@ def extract_text_table(lines: Sequence[str]) -> Tuple[List[str], Optional[List[s
     row_lines = content_lines[1:] if has_header else content_lines
     data_rows = [split_text_line(line, delimiter) for line in row_lines]
     return metadata_lines, header, data_rows, content_lines
+
+
+def parse_source_resolution(metadata_lines: Sequence[str]) -> Tuple[Optional[int], Optional[int]]:
+    priority_keys = ('calibration area', 'stimulus dimension')
+    for key in priority_keys:
+        for line in metadata_lines:
+            lowered = line.lower()
+            if key not in lowered:
+                continue
+            numbers = [maybe_float(item) for item in re.findall(r'[-+]?\d+(?:\.\d+)?', line)]
+            numbers = [item for item in numbers if item is not None]
+            if len(numbers) >= 2:
+                width = int(round(numbers[0]))
+                height = int(round(numbers[1]))
+                if width > 0 and height > 0:
+                    return width, height
+    return None, None
+
+
+def compute_out_of_source_bounds_ratio(x_values: Sequence[float],
+                                       y_values: Sequence[float],
+                                       source_resolution: Tuple[Optional[int], Optional[int]],
+                                       coordinate_mode: str) -> Optional[float]:
+    source_width, source_height = source_resolution
+    if coordinate_mode != 'pixel' or not x_values or not y_values:
+        return None
+    if not source_width or not source_height:
+        return None
+    xs = np.asarray(x_values, dtype=np.float32)
+    ys = np.asarray(y_values, dtype=np.float32)
+    in_bounds = (
+        (xs >= 0.0) & (xs <= float(source_width)) &
+        (ys >= 0.0) & (ys <= float(source_height)))
+    return float(np.mean(~in_bounds))
+
+
+def resolve_source_resolution(gaze_format: GazeFormat,
+                              override_width: Optional[float] = None,
+                              override_height: Optional[float] = None,
+                              fallback_resolution: Optional[Tuple[int, int]] = None
+                              ) -> Tuple[Tuple[Optional[int], Optional[int]], str]:
+    if override_width and override_height and override_width > 0 and override_height > 0:
+        return (int(round(override_width)), int(round(override_height))), 'user_override'
+    source_width, source_height = gaze_format.source_resolution
+    if source_width and source_height:
+        return (int(source_width), int(source_height)), 'metadata'
+    if fallback_resolution and fallback_resolution[0] > 0 and fallback_resolution[1] > 0:
+        return (int(fallback_resolution[0]), int(fallback_resolution[1])), 'fallback'
+    return (None, None), 'none'
 
 
 def iter_text_rows(path: str,
@@ -555,6 +607,7 @@ def parse_text_gaze_file(path: str,
     delimiter = detect_delimiter(content_lines)
     has_header = header is not None
     columns = infer_columns(header, data_rows)
+    source_resolution = parse_source_resolution(metadata_lines)
 
     records: List[dict] = []
     skipped = 0
@@ -622,6 +675,8 @@ def parse_text_gaze_file(path: str,
         warnings_list.append('no_validity_confidence_columns')
     if metadata_lines:
         warnings_list.append('metadata_lines_skipped')
+    out_of_source_bounds_ratio = compute_out_of_source_bounds_ratio(
+        x_values, y_values, source_resolution, detect_coordinate_mode(x_values, y_values))
 
     fmt = GazeFormat(
         path=path,
@@ -629,6 +684,7 @@ def parse_text_gaze_file(path: str,
         delimiter=delimiter,
         has_header=has_header,
         encoding=encoding,
+        metadata_lines=metadata_lines[:20],
         header=list(header) if header else [],
         preview_rows=[list(row) for row in data_rows[:5]],
         columns=columns,
@@ -640,6 +696,8 @@ def parse_text_gaze_file(path: str,
         y_range=(min(y_values), max(y_values)) if y_values else (None, None),
         gaze_type_counts=dict(gaze_type_counts),
         validity_counts=dict(validity_counts),
+        source_resolution=source_resolution,
+        out_of_source_bounds_ratio=out_of_source_bounds_ratio,
     )
     return ParsedGazeData(
         path=path,
@@ -766,6 +824,8 @@ def parse_json_gaze_file(path: str,
         y_range=(min(y_values), max(y_values)) if y_values else (None, None),
         gaze_type_counts=dict(gaze_type_counts),
         validity_counts=dict(validity_counts),
+        source_resolution=(None, None),
+        out_of_source_bounds_ratio=None,
     )
     return ParsedGazeData(
         path=path,
@@ -1021,20 +1081,57 @@ def align_gaze_to_clip(parsed_gaze: ParsedGazeData,
 
 def normalize_xy_array(gaze_xy: np.ndarray,
                        coordinate_mode: str,
-                       image_size: Tuple[int, int]) -> np.ndarray:
+                       image_size: Tuple[int, int],
+                       source_resolution: Optional[Tuple[Optional[int], Optional[int]]] = None,
+                       clip: bool = False,
+                       return_info: bool = False):
     output = np.asarray(gaze_xy, dtype=np.float32).copy()
     width, height = image_size
+    source_width = None
+    source_height = None
+    if source_resolution is not None:
+        source_width, source_height = source_resolution
+    source_in_bounds = np.ones((output.shape[0],), dtype=bool)
+    coordinate_scale_mode = 'identity'
     if coordinate_mode == 'pixel':
-        if width <= 0 or height <= 0:
-            raise ValueError('image_size must be positive for pixel coordinates')
-        output[:, 0] /= float(width)
-        output[:, 1] /= float(height)
-    elif coordinate_mode == 'unknown':
-        finite = output[np.isfinite(output)]
-        if finite.size and float(np.nanmax(np.abs(finite))) > 1.5 and width > 0 and height > 0:
+        if source_width and source_height and source_width > 0 and source_height > 0:
+            coordinate_scale_mode = 'source_resolution'
+            source_in_bounds = (
+                (output[:, 0] >= 0.0) & (output[:, 0] <= float(source_width)) &
+                (output[:, 1] >= 0.0) & (output[:, 1] <= float(source_height)))
+            output[:, 0] /= float(source_width)
+            output[:, 1] /= float(source_height)
+        elif width > 0 and height > 0:
+            coordinate_scale_mode = 'frame_size_fallback'
+            source_in_bounds = (
+                (output[:, 0] >= 0.0) & (output[:, 0] <= float(width)) &
+                (output[:, 1] >= 0.0) & (output[:, 1] <= float(height)))
             output[:, 0] /= float(width)
             output[:, 1] /= float(height)
+        else:
+            raise ValueError('image_size or source_resolution must be positive for pixel coordinates')
+    elif coordinate_mode == 'unknown':
+        finite = output[np.isfinite(output)]
+        if finite.size and float(np.nanmax(np.abs(finite))) > 1.5:
+            if source_width and source_height and source_width > 0 and source_height > 0:
+                coordinate_scale_mode = 'source_resolution_unknown_mode'
+                source_in_bounds = (
+                    (output[:, 0] >= 0.0) & (output[:, 0] <= float(source_width)) &
+                    (output[:, 1] >= 0.0) & (output[:, 1] <= float(source_height)))
+                output[:, 0] /= float(source_width)
+                output[:, 1] /= float(source_height)
+            elif width > 0 and height > 0:
+                coordinate_scale_mode = 'frame_size_unknown_mode'
+                source_in_bounds = (
+                    (output[:, 0] >= 0.0) & (output[:, 0] <= float(width)) &
+                    (output[:, 1] >= 0.0) & (output[:, 1] <= float(height)))
+                output[:, 0] /= float(width)
+                output[:, 1] /= float(height)
     output = np.nan_to_num(output, nan=0.0, posinf=0.0, neginf=0.0)
+    if clip:
+        output = np.clip(output, 0.0, 1.0)
+    if return_info:
+        return output, source_in_bounds.astype(bool), coordinate_scale_mode
     return output
 
 

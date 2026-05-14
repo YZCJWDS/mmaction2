@@ -71,10 +71,12 @@ def main():
                 header=fmt.header,
                 preview_rows=fmt.preview_rows,
                 coordinate_mode=fmt.coordinate_mode,
+                source_resolution=list(fmt.source_resolution),
                 sampled_rows=fmt.sampled_rows,
                 skipped_rows=fmt.skipped_rows,
                 x_range=fmt.x_range,
                 y_range=fmt.y_range,
+                out_of_source_bounds_ratio=fmt.out_of_source_bounds_ratio,
                 gaze_type_counts=fmt.gaze_type_counts,
                 validity_counts=fmt.validity_counts,
                 timestamp_unit=parsed.timestamp_unit,
@@ -95,7 +97,11 @@ def main():
             print(f'  preview_rows={fmt.preview_rows[:5]}')
         print(f'  columns={fmt.columns}')
         print(f'  sampled_rows={fmt.sampled_rows} skipped_rows={fmt.skipped_rows}')
-        print(f'  coordinate_mode={fmt.coordinate_mode} x_range={fmt.x_range} y_range={fmt.y_range}')
+        print(
+            f'  source_resolution={list(fmt.source_resolution)} '
+            f'coordinate_mode={fmt.coordinate_mode} '
+            f'x_range={fmt.x_range} y_range={fmt.y_range} '
+            f'out_of_source_bounds_ratio={fmt.out_of_source_bounds_ratio}')
         if fmt.gaze_type_counts:
             print(f'  gaze_types={dict(fmt.gaze_type_counts)}')
         if fmt.validity_counts:

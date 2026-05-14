@@ -20,7 +20,8 @@ from projects.egtea_gaze.egtea_gaze.utils import (
     align_gaze_to_clip, build_gaze_file_index, compare_annotation_lists,
     dump_json, ensure_dir, gaze_xy_to_heatmaps, get_video_stats,
     match_gaze_file, normalize_xy_array, parse_clip_start_frame,
-    parse_gaze_file, resolve_video_path, safe_path_id, stable_hash)
+    parse_gaze_file, resolve_source_resolution, resolve_video_path,
+    safe_path_id, stable_hash)
 
 
 def parse_args():
@@ -35,6 +36,10 @@ def parse_args():
     parser.add_argument('--sigma', type=float, default=1.5)
     parser.add_argument('--only-fixation', action='store_true')
     parser.add_argument('--fixation-values', nargs='*', default=None)
+    parser.add_argument('--gaze-source-width', type=float, default=None)
+    parser.add_argument('--gaze-source-height', type=float, default=None)
+    parser.add_argument('--out-of-source-policy', choices=['clip', 'invalid'],
+                        default='clip')
     parser.add_argument('--num-workers', type=int, default=8)
     parser.add_argument('--overwrite', action='store_true')
     return parser.parse_args()
@@ -66,6 +71,9 @@ def process_one_sample(video_relpath: str,
                        sigma: float,
                        only_fixation: bool,
                        fixation_values,
+                       gaze_source_width: float | None,
+                       gaze_source_height: float | None,
+                       out_of_source_policy: str,
                        overwrite: bool) -> dict:
     video_path = resolve_video_path(video_root, video_relpath)
     sample_id = f'{safe_path_id(Path(video_relpath).stem)}_{stable_hash(video_relpath)}'
@@ -109,12 +117,32 @@ def process_one_sample(video_relpath: str,
     except Exception:
         pass
 
-    gaze_xy = normalize_xy_array(aligned['gaze_xy'], coordinate_mode, image_size)
+    fallback_resolution = image_size if coordinate_mode == 'pixel' else None
+    source_resolution, source_resolution_mode = resolve_source_resolution(
+        parsed.gaze_format,
+        override_width=gaze_source_width,
+        override_height=gaze_source_height,
+        fallback_resolution=fallback_resolution)
+    gaze_xy, source_in_bounds, coordinate_scale_mode = normalize_xy_array(
+        aligned['gaze_xy'],
+        coordinate_mode,
+        image_size,
+        source_resolution=source_resolution,
+        clip=(out_of_source_policy == 'clip'),
+        return_info=True)
     gaze_valid = np.asarray(aligned['gaze_valid'], dtype=np.uint8)
+    frames_out_of_source_bounds = int(
+        np.sum((gaze_valid > 0) & (~source_in_bounds.astype(bool))))
+    if out_of_source_policy == 'invalid':
+        gaze_valid = gaze_valid * source_in_bounds.astype(np.uint8)
     gaze_maps = gaze_xy_to_heatmaps(gaze_xy, gaze_valid, heatmap_size, sigma).astype(np.float16)
     no_valid_gaze = int(gaze_valid.sum()) == 0
 
     ensure_dir(out_dir)
+    source_resolution_array = np.asarray([
+        int(source_resolution[0]) if source_resolution[0] is not None else -1,
+        int(source_resolution[1]) if source_resolution[1] is not None else -1,
+    ], dtype=np.int32)
     np.savez_compressed(
         npz_path,
         gaze_xy=gaze_xy.astype(np.float16),
@@ -125,6 +153,8 @@ def process_one_sample(video_relpath: str,
         original_video=np.asarray(video_relpath),
         source_gaze_file=np.asarray(gaze_file),
         coordinate_mode=np.asarray(coordinate_mode),
+        coordinate_scale_mode=np.asarray(coordinate_scale_mode),
+        source_resolution=source_resolution_array,
         warning_codes=np.asarray(aligned['warning_codes'], dtype=object),
     )
     return dict(
@@ -133,6 +163,10 @@ def process_one_sample(video_relpath: str,
         npz_path=npz_path,
         source_gaze_file=gaze_file,
         coordinate_mode=coordinate_mode,
+        coordinate_scale_mode=coordinate_scale_mode,
+        source_resolution=list(source_resolution),
+        source_resolution_mode=source_resolution_mode,
+        frames_out_of_source_bounds=frames_out_of_source_bounds,
         warnings=match_warnings + aligned['warning_codes'],
         valid_frames=int(gaze_valid.sum()),
     )
@@ -153,6 +187,7 @@ def main():
         only_fixation=args.only_fixation,
         fixation_values=args.fixation_values,
         coordinate_mode='normalized_per_clip',
+        out_of_source_policy=args.out_of_source_policy,
         created_at=np.datetime64('now').astype(str),
         num_samples=0,
         num_success=0,
@@ -204,6 +239,9 @@ def main():
                     args.sigma,
                     args.only_fixation,
                     args.fixation_values,
+                    args.gaze_source_width,
+                    args.gaze_source_height,
+                    args.out_of_source_policy,
                     args.overwrite))
             for future in as_completed(futures):
                 try:
@@ -223,6 +261,9 @@ def main():
                 status=result['status'],
                 source_gaze_file=result.get('source_gaze_file'),
                 coordinate_mode=result.get('coordinate_mode'),
+                coordinate_scale_mode=result.get('coordinate_scale_mode'),
+                source_resolution=result.get('source_resolution'),
+                frames_out_of_source_bounds=result.get('frames_out_of_source_bounds', 0),
                 valid_frames=result.get('valid_frames', 0),
                 warnings=result.get('warnings', []),
             )
